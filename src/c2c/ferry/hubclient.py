@@ -23,6 +23,7 @@ class HubClient:
         self._outbox: list[dict] = []      # queued ops (post/ack/announce)
         self._ws = None
         self._connected = False
+        self._flush_lock = asyncio.Lock()
 
     def post(self, env: dict) -> None:
         self._enqueue({"op": "post", "env": env})
@@ -39,15 +40,19 @@ class HubClient:
             asyncio.create_task(self._flush())
 
     async def _flush(self) -> None:
-        while self._outbox and self._ws is not None:
-            op = self._outbox[0]
-            try:
-                await self._ws.send(json.dumps(op))
-            except websockets.ConnectionClosed:
-                return
-            self._outbox.pop(0)
+        async with self._flush_lock:
+            while self._outbox and self._ws is not None:
+                op = self._outbox[0]
+                try:
+                    await self._ws.send(json.dumps(op))
+                except websockets.ConnectionClosed:
+                    return
+                self._outbox.pop(0)
 
-    async def connect_once(self) -> None:
+    async def connect_once(self) -> bool:
+        """One connection attempt. Returns True if it got `welcome` and ran
+        the listen loop to completion/disconnect; False if the hub refused
+        the hello (e.g. bad auth) without ever reaching the listen loop."""
         async with websockets.connect(self._url, max_size=1_048_576) as ws:
             self._ws = ws
             await ws.send(json.dumps(
@@ -55,7 +60,9 @@ class HubClient:
             welcome = json.loads(await ws.recv())
             if welcome.get("op") != "welcome":
                 log.error("hub refused: %s", welcome)
-                return
+                self._connected = False
+                self._ws = None
+                return False
             self._connected = True
             await self._flush()
             try:
@@ -68,13 +75,14 @@ class HubClient:
             finally:
                 self._connected = False
                 self._ws = None
+            return True
 
     async def run(self) -> None:
         backoff = 1.0
         while True:
             try:
-                await self.connect_once()
-                backoff = 1.0
+                if await self.connect_once():
+                    backoff = 1.0
             except (OSError, websockets.WebSocketException) as exc:
                 log.warning("hub connect failed: %s; retry in %.0fs", exc, backoff)
             except asyncio.CancelledError:
