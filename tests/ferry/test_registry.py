@@ -60,6 +60,28 @@ def test_pick_target_none_when_no_match(tmp_path):
     assert r.pick_target(ss, "NOPE", lambda cwd: "A") is None
 
 
+def test_pick_target_skips_protocol_mismatch(tmp_path):
+    # A fresher protocol-2 session must not shadow an older protocol-1 one:
+    # inject() only speaks protocol 1, so picking the protocol-2 session
+    # would fail closed and wedge delivery even though a usable session
+    # exists.
+    old = write_session(tmp_path, 1, "old", "/repo", "/s1", su=1000)
+    new = write_session(tmp_path, 2, "new", "/repo", "/s2", su=9000)
+    new["peerProtocol"] = 2
+    (tmp_path / "2.json").write_text(json.dumps(new))
+    ss = r.read_sessions(str(tmp_path))
+    pick = r.pick_target(ss, "PROJ", lambda cwd: "PROJ")
+    assert pick["pid"] == 1
+
+
+def test_pick_target_none_when_only_protocol_mismatch(tmp_path):
+    entry = write_session(tmp_path, 1, "a", "/repo", "/s1")
+    entry["peerProtocol"] = 2
+    (tmp_path / "1.json").write_text(json.dumps(entry))
+    ss = r.read_sessions(str(tmp_path))
+    assert r.pick_target(ss, "PROJ", lambda cwd: "PROJ") is None
+
+
 def test_peer_token_for_uses_no_realpath_hash(tmp_path):
     sock = "/tmp/cc-socks/100.sock"
     entry = write_session(tmp_path, 100, "a", "/x", sock)

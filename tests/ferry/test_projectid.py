@@ -28,3 +28,28 @@ def test_project_for_cwd_real_repo(tmp_path):
 
 def test_project_for_cwd_no_repo(tmp_path):
     assert p.project_for_cwd(str(tmp_path)) is None
+
+
+def test_project_for_cwd_caches_per_cwd(tmp_path, monkeypatch):
+    # project_for_cwd is called once per session per delivery/announce from
+    # the async orchestrator; it must not re-spawn git on every call for a
+    # cwd whose result is already known.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "remote", "add", "origin",
+                    "git@github.com:sackheads/iris.git"], cwd=tmp_path, check=True)
+    p.project_for_cwd.cache_clear()
+    real_run = subprocess.run
+    calls = []
+
+    def counting_run(*args, **kwargs):
+        calls.append(args)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(p.subprocess, "run", counting_run)
+    try:
+        first = p.project_for_cwd(str(tmp_path))
+        second = p.project_for_cwd(str(tmp_path))
+        assert first == second == "github.com/sackheads/iris"
+        assert len(calls) == 1
+    finally:
+        p.project_for_cwd.cache_clear()

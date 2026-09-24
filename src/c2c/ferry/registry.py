@@ -6,6 +6,8 @@ import json
 import os
 import re
 
+from c2c.ferry import wire
+
 _PID_JSON = re.compile(r"^\d+\.json$")
 
 
@@ -36,6 +38,7 @@ def session_by_socket(sessions: list[dict], sock: str) -> dict | None:
 
 def pick_target(sessions, project, projectfn) -> dict | None:
     matches = [s for s in sessions if projectfn(s.get("cwd", "")) == project]
+    matches = [s for s in matches if wire.protocol_ok(s)]
     if not matches:
         return None
     bg = [s for s in matches if s.get("kind") == "bg"]

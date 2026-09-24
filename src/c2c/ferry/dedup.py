@@ -11,11 +11,23 @@ class Dedup:
         self._seen: dict[str, int] = {}
 
     def seen(self, msg_id: str) -> bool:
+        was_seen = self.check(msg_id)
+        self.record(msg_id)
+        return was_seen
+
+    def check(self, msg_id: str) -> bool:
+        """Return whether msg_id is currently recorded within the window,
+        without recording it or refreshing its timestamp (a pure peek)."""
         now = self._now()
         self._evict(now)
         prev = self._seen.get(msg_id)
-        self._seen[msg_id] = now
         return prev is not None and (now - prev) <= self._window
+
+    def record(self, msg_id: str) -> None:
+        """Record/refresh msg_id's timestamp now."""
+        now = self._now()
+        self._evict(now)
+        self._seen[msg_id] = now
 
     def _evict(self, now: int) -> None:
         cutoff = now - self._window

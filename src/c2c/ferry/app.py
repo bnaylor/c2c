@@ -44,13 +44,15 @@ class Ferry:
 
     async def on_deliver(self, env: dict) -> None:
         mid = env["msg_id"]
-        if self._dedup.seen(mid):
+        if self._dedup.check(mid):
+            # already delivered -> this is a genuine duplicate deliver;
+            # suppress it and re-ack so the hub stops redelivering.
             self._hub.ack(mid)
             return
         target = registry.pick_target(self._sessions(), env["project"], self._projectfn)
         if target is None:
             log.info("no local session for project %s; holding %s", env["project"], mid)
-            return  # do NOT ack: redelivers later
+            return  # do NOT record, do NOT ack: redelivers later
         payload = env.get("payload", {})
         # Record the reply-correlation BEFORE injecting: inject() writes to
         # the target and can trigger a reply before it returns (the target
@@ -66,7 +68,11 @@ class Ferry:
         if not ok:
             log.warning("inject failed for %s -> %s", mid, target.get("name"))
             self._pending_reply.pop(target["messagingSocketPath"], None)
-            return  # do NOT ack
+            return  # do NOT record, do NOT ack
+        # Only mark as delivered once inject has actually succeeded, so a
+        # held or failed delivery remains eligible for a later redeliver
+        # instead of being silently dropped as a "duplicate".
+        self._dedup.record(mid)
         self._hub.ack(mid)
 
     def on_local_message(self, fields: dict) -> None:

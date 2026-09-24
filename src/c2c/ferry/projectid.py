@@ -1,6 +1,7 @@
 """Map a working directory to a stable project id via its git origin URL."""
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
 
@@ -27,6 +28,7 @@ def normalize_remote(url: str) -> str:
     return f"{host.lower()}/{path.strip('/')}"
 
 
+@functools.lru_cache(maxsize=None)
 def project_for_cwd(cwd: str) -> str | None:
     try:
         out = subprocess.run(

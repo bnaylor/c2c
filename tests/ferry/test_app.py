@@ -73,7 +73,7 @@ async def test_on_deliver_dedup_acks_without_inject(tmp_path, short_sock_dir):
     lp = LocalPeer("home", str(tmp_path), short_sock_dir, on_message=lambda f: None)
     lp.publish()
     rec = Recorder()
-    d = Dedup(600000, lambda: 0); d.seen("m1")  # already seen
+    d = Dedup(600000, lambda: 0); d.record("m1")  # prior successful delivery
     ferry = Ferry(cfg(tmp_path, short_sock_dir), lp, rec, d,
                   projectfn=lambda cwd: "PROJ", now_ms=lambda: 1)
     env = {"v": 1, "msg_id": "m1", "origin_host": "home", "project": "PROJ",
@@ -83,6 +83,45 @@ async def test_on_deliver_dedup_acks_without_inject(tmp_path, short_sock_dir):
     await ferry.on_deliver(env)
     assert rec.acks == ["m1"] and rec.posts == []
     lp.cleanup()
+
+
+async def test_on_deliver_held_then_redelivered_is_not_lost(tmp_path, short_sock_dir):
+    # Regression for: dedup recorded mid at check-time, so a redeliver of a
+    # held message (no target session yet) was silently ack'd and dropped
+    # without ever being injected once a session showed up.
+    lp = LocalPeer("home", str(tmp_path), short_sock_dir, on_message=lambda f: None)
+    lp.publish()
+    rec = Recorder()
+    ferry = Ferry(cfg(tmp_path, short_sock_dir), lp, rec, Dedup(600000, lambda: 0),
+                  projectfn=lambda cwd: "PROJ", now_ms=lambda: 1)
+    env = {"v": 1, "msg_id": "m1", "origin_host": "home", "project": "PROJ",
+           "target": {"kind": "host", "host": "work", "project": "PROJ"},
+           "type": "note", "ttl_s": 100000, "created_at": 1, "orig_msg_id": None,
+           "payload": {"body": "run tests", "hop_chain": None}}
+
+    # First delivery attempt: no matching session exists yet -> held, no ack.
+    await ferry.on_deliver(env)
+    assert rec.acks == [] and rec.posts == []
+
+    # A matching session now appears (simulating the offline-then-replay
+    # path), and the hub redelivers the same msg_id ~15s later.
+    entry, sock, tok = make_session(tmp_path, short_sock_dir, 300, "iris-bg", "/repo")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock); srv.listen(2); srv.setblocking(False)
+
+    loop = asyncio.get_running_loop()
+    accept = asyncio.create_task(loop.sock_accept(srv))
+    await ferry.on_deliver(env)
+    conn, _ = await accept
+    data = b""
+    while data.count(b"\n") < 2:
+        c = await loop.sock_recv(conn, 65536)
+        if not c: break
+        data += c
+    _auth, user = [json.loads(x) for x in data.decode().strip().split("\n")]
+    assert wire.parse_wrapper(user["message"]["content"])["body"] == "run tests"
+    assert rec.acks == ["m1"]
+    lp.cleanup(); srv.close(); conn.close()
 
 
 def test_on_local_message_posts_note(tmp_path, short_sock_dir):
