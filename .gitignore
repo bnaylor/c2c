@@ -1,0 +1,5 @@
+# runtime capture from tap.py
+tap.log
+
+# scratch
+*.tmp
