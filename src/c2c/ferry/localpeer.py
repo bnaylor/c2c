@@ -1,0 +1,120 @@
+"""The ferry's local peer identity: receive from and inject into sessions."""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import time
+from typing import Callable
+
+from c2c.ferry import registry, wire
+
+
+class LocalPeer:
+    def __init__(self, name: str, sessions_dir: str, sock_dir: str,
+                 on_message: Callable[[dict], None]) -> None:
+        self.name = name
+        self.sessions_dir = sessions_dir
+        self.sock_dir = sock_dir
+        self._on_message = on_message
+        self.pid = os.getpid()
+        self.sock_path = f"{sock_dir}/{self.pid}.sock"
+        self.peer_token = os.urandom(16).hex()
+        self._srv: asyncio.Server | None = None
+
+    @property
+    def sock_uri(self) -> str:
+        return f"uds:{self.sock_path}"
+
+    def publish(self) -> None:
+        os.makedirs(self.sock_dir, mode=0o700, exist_ok=True)
+        os.makedirs(self.sessions_dir, mode=0o700, exist_ok=True)
+        ps = time.strftime("%a %b %e %H:%M:%S %Y")
+        h = hashlib.sha256(self.sock_path.encode()).hexdigest()  # no realpath
+        um = os.umask(0o077)
+        with open(os.path.join(self.sessions_dir, f"{self.pid}.{h}.key"), "w") as f:
+            json.dump({"peerToken": self.peer_token, "procStart": ps}, f)
+        os.umask(um)
+        now = int(time.time() * 1000)
+        entry = {
+            "pid": self.pid,
+            "sessionId": f"00000000-0000-4000-8000-{self.pid:012d}",
+            "cwd": os.getcwd(), "startedAt": now, "procStart": ps,
+            "version": "2.1.236", "peerProtocol": 1,
+            "peerFeatures": ["notify_idle"], "kind": "interactive",
+            "entrypoint": "cli", "messagingSocketPath": self.sock_path,
+            "name": self.name, "nameSource": "derived", "nameSince": now,
+            "status": "idle", "updatedAt": now, "statusUpdatedAt": now,
+        }
+        with open(os.path.join(self.sessions_dir, f"{self.pid}.json"), "w") as f:
+            json.dump(entry, f)
+
+    async def serve(self) -> None:
+        if os.path.exists(self.sock_path):
+            os.unlink(self.sock_path)
+        self._srv = await asyncio.start_unix_server(self._handle, path=self.sock_path)
+        os.chmod(self.sock_path, 0o600)
+        async with self._srv:
+            await self._srv.serve_forever()
+
+    async def _handle(self, reader, writer) -> None:
+        try:
+            data = await reader.read(wire_max())
+        except OSError:
+            return
+        finally:
+            writer.close()
+        for line in data.split(b"\n"):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("type") == "user":
+                content = obj.get("message", {}).get("content", "")
+                fields = wire.parse_wrapper(content)
+                if fields is not None:
+                    fields["raw_from"] = obj.get("from")
+                    self._on_message(fields)
+
+    async def inject(self, target_entry: dict, body: str,
+                     hop_chain: list[str] | None, msg_id: str) -> bool:
+        if not wire.protocol_ok(target_entry):
+            return False
+        token = registry.peer_token_for(target_entry, self.sessions_dir)
+        if not token:
+            return False
+        msg = wire.build_user_message(self.sock_uri, self.name, body,
+                                      msg_id, hop_chain)
+        raw = wire.encode_frames(token, msg)
+        target_sock = target_entry["messagingSocketPath"]
+        try:
+            reader, writer = await asyncio.open_unix_connection(target_sock)
+        except OSError:
+            return False
+        try:
+            writer.write(raw)
+            await writer.drain()
+            await asyncio.sleep(0.15)  # macOS buffer-flush parity
+        finally:
+            writer.close()
+        return True
+
+    def cleanup(self) -> None:
+        h = hashlib.sha256(self.sock_path.encode()).hexdigest()
+        for p in (
+            self.sock_path,
+            os.path.join(self.sessions_dir, f"{self.pid}.{h}.key"),
+            os.path.join(self.sessions_dir, f"{self.pid}.json"),
+        ):
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+
+
+def wire_max() -> int:
+    from c2c.envelope import MAX_BYTES
+    return MAX_BYTES
