@@ -80,8 +80,46 @@ class Hub:
             await conn.ws.send(json.dumps({"op": "deliver", "env": env}))
 
     async def _on_message(self, conn: _Conn, raw) -> None:
-        # Filled in by Task 6 (post / ack / announce). Ignore for now.
-        return
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            return
+        if not isinstance(msg, dict):
+            return
+        op = msg.get("op")
+        if op == "post":
+            await self._on_post(conn, msg)
+        elif op == "ack":
+            mid = msg.get("msg_id")
+            if isinstance(mid, str) and mid:
+                self._mb.ack(mid, conn.host)
+        elif op == "announce":
+            conn.projects = set(msg.get("projects") or [])
+            await self._drain(conn)
+
+    async def _on_post(self, conn: _Conn, msg: dict) -> None:
+        env = msg.get("env")
+        try:
+            _env.validate(env)
+        except EnvelopeError as exc:
+            await conn.ws.send(json.dumps({"op": "error", "reason": str(exc)}))
+            return
+        self._mb.put(env)
+        for rc in self._recipients(env):
+            try:
+                await rc.ws.send(json.dumps({"op": "deliver", "env": env}))
+            except websockets.ConnectionClosed:
+                pass
+
+    def _recipients(self, env: dict) -> list[_Conn]:
+        t = env["target"]
+        if t["kind"] == "host":
+            rc = self._conns.get(t["host"])
+            return [rc] if rc is not None else []
+        return [
+            c for c in self._conns.values()
+            if c.host != env["origin_host"] and env["project"] in c.projects
+        ]
 
     async def _error(self, ws, reason: str) -> None:
         try:
