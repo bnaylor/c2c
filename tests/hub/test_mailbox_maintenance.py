@@ -4,7 +4,7 @@ from c2c.hub.mailbox import Mailbox
 def env(msg_id, project="P", created=1000, ttl=10):
     return {
         "v": 1, "msg_id": msg_id, "origin_host": "home", "project": project,
-        "target": {"kind": "host", "host": "work", "project": project},
+        "target": {"kind": "project", "project": project},
         "type": "note", "ttl_s": ttl, "created_at": created,
         "orig_msg_id": None, "payload": {},
     }
@@ -48,4 +48,20 @@ def test_cap_is_per_project(tmp_path):
     p_ids = [e["msg_id"] for e in m.pending_for("work", {"P"}, 5000)]
     q_ids = [e["msg_id"] for e in m.pending_for("work", {"Q"}, 5000)]
     assert p_ids == ["p2"] and q_ids == ["q1"]
+    m.close()
+
+
+def test_directed_delivered_even_if_host_lacks_project(tmp_path):
+    # A host-directed message must reach its target host regardless of
+    # whether that host currently has the project announced (e.g.
+    # delegating "work:iris" to an idle box must not be black-holed).
+    m = Mailbox(str(tmp_path / "m.db"))
+    m.put({
+        "v": 1, "msg_id": "d1", "origin_host": "home", "project": "iris",
+        "target": {"kind": "host", "host": "work", "project": "iris"},
+        "type": "note", "ttl_s": 10000, "created_at": 1000,
+        "orig_msg_id": None, "payload": {},
+    })
+    ids = [e["msg_id"] for e in m.pending_for("work", {"P", "Q"}, 2000)]
+    assert ids == ["d1"]
     m.close()

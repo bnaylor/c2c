@@ -93,8 +93,6 @@ class Mailbox:
             env = json.loads(r["body"])
             if env["target"]["kind"] == "project" and env["project"] not in projects:
                 continue
-            if env["target"]["kind"] == "host" and env["target"]["project"] not in projects:
-                continue
             out.append(env)
         return out
 

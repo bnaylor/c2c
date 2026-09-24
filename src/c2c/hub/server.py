@@ -5,6 +5,7 @@ forwards envelopes received from authenticated hosts.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -16,6 +17,12 @@ from c2c import envelope as _env
 from c2c.envelope import MAX_BYTES, EnvelopeError
 
 log = logging.getLogger("c2c.hub.server")
+
+# Max time to wait for the initial `hello` frame before dropping an
+# unauthenticated connection. Per-IP connection/rate limiting is NOT done
+# here; it is expected to be handled by the deployment's reverse proxy
+# (e.g. nginx/haproxy) sitting in front of the hub.
+HELLO_TIMEOUT_S = 10
 
 
 def _now_ms() -> int:
@@ -39,6 +46,8 @@ class Hub:
         self._conns: dict[str, _Conn] = {}  # host_id -> _Conn (one per host)
 
     async def serve(self, host: str, port: int, ssl_context=None):
+        # No per-IP connection/rate limiting here by design; that belongs to
+        # whatever reverse proxy terminates the connection in front of us.
         return await websockets.serve(
             self.handler, host, port, ssl=ssl_context, max_size=MAX_BYTES,
         )
@@ -60,18 +69,37 @@ class Hub:
 
     async def _do_hello(self, ws) -> _Conn | None:
         try:
-            raw = await ws.recv()
+            raw = await asyncio.wait_for(ws.recv(), timeout=HELLO_TIMEOUT_S)
             msg = json.loads(raw)
-        except (websockets.ConnectionClosed, ValueError):
+        except asyncio.TimeoutError:
+            # No hello within the grace period: drop the connection quietly,
+            # no error frame owed to a client that never authenticated.
+            try:
+                await ws.close()
+            except websockets.ConnectionClosed:
+                pass
+            return None
+        except (websockets.ConnectionClosed, ValueError, TypeError, UnicodeDecodeError):
             return None
         if not isinstance(msg, dict) or msg.get("op") != "hello":
             await self._error(ws, "expected hello")
             return None
-        host = self._auth.verify(msg.get("token", ""))
+        token = msg.get("token")
+        if not isinstance(token, str) or not token:
+            await self._error(ws, "token must be a non-empty string")
+            return None
+        raw_projects = msg.get("projects", [])
+        if not isinstance(raw_projects, list):
+            await self._error(ws, "projects must be a list")
+            return None
+        host = self._auth.verify(token)
         if host is None:
             await self._error(ws, "auth failed")
             return None
-        projects = set(msg.get("projects") or [])
+        try:
+            projects = {p for p in raw_projects if isinstance(p, str)}
+        except TypeError:
+            projects = set()
         await ws.send(json.dumps({"op": "welcome", "host": host}))
         return _Conn(ws, host, projects)
 
@@ -94,7 +122,11 @@ class Hub:
             if isinstance(mid, str) and mid:
                 self._mb.ack(mid, conn.host)
         elif op == "announce":
-            conn.projects = set(msg.get("projects") or [])
+            raw_projects = msg.get("projects")
+            if isinstance(raw_projects, list):
+                conn.projects = {p for p in raw_projects if isinstance(p, str)}
+            else:
+                conn.projects = set()
             await self._drain(conn)
 
     async def _on_post(self, conn: _Conn, msg: dict) -> None:

@@ -29,6 +29,22 @@ async def _hub(tmp_path, seed=None):
     return hub, mb, server, port
 
 
+async def test_hello_timeout_closes_connection_cleanly(tmp_path, monkeypatch):
+    import c2c.hub.server as server_mod
+    monkeypatch.setattr(server_mod, "HELLO_TIMEOUT_S", 0.2)
+    hub, mb, server, port = await _hub(tmp_path)
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        # never send a hello
+        with pytest.raises(websockets.ConnectionClosed):
+            await ws.recv()
+    # server must still be alive and able to serve other connections
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws2:
+        await ws2.send(json.dumps({"op": "hello", "token": "t-work", "projects": ["P"]}))
+        msg = json.loads(await ws2.recv())
+        assert msg == {"op": "welcome", "host": "work"}
+    server.close(); await server.wait_closed(); mb.close()
+
+
 async def test_hello_bad_token_gets_error_and_close(tmp_path):
     hub, mb, server, port = await _hub(tmp_path)
     async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
@@ -37,6 +53,47 @@ async def test_hello_bad_token_gets_error_and_close(tmp_path):
         assert msg["op"] == "error"
         with pytest.raises(websockets.ConnectionClosed):
             await ws.recv()
+    server.close(); await server.wait_closed(); mb.close()
+
+
+async def test_hello_non_string_token_handled_cleanly(tmp_path):
+    hub, mb, server, port = await _hub(tmp_path)
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await ws.send(json.dumps({"op": "hello", "token": ["nope"], "projects": []}))
+        try:
+            msg = json.loads(await ws.recv())
+            assert msg["op"] == "error"
+        except websockets.ConnectionClosed:
+            pass  # clean close is also acceptable
+    # server must still be alive and able to serve other connections
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws2:
+        await ws2.send(json.dumps({"op": "hello", "token": "t-work", "projects": ["P"]}))
+        msg = json.loads(await ws2.recv())
+        assert msg == {"op": "welcome", "host": "work"}
+    server.close(); await server.wait_closed(); mb.close()
+
+
+async def test_hello_non_list_projects_handled_cleanly(tmp_path):
+    hub, mb, server, port = await _hub(tmp_path)
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await ws.send(json.dumps({"op": "hello", "token": "t-work", "projects": 12345}))
+        try:
+            msg = json.loads(await ws.recv())
+            assert msg["op"] == "error"
+        except websockets.ConnectionClosed:
+            pass  # clean close is also acceptable
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws2:
+        await ws2.send(json.dumps({"op": "hello", "token": "t-work", "projects": "PQ"}))
+        try:
+            msg = json.loads(await ws2.recv())
+            assert msg["op"] == "error"
+        except websockets.ConnectionClosed:
+            pass
+    # server must still be alive and able to serve other connections
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws3:
+        await ws3.send(json.dumps({"op": "hello", "token": "t-home", "projects": ["P"]}))
+        msg = json.loads(await ws3.recv())
+        assert msg == {"op": "welcome", "host": "home"}
     server.close(); await server.wait_closed(); mb.close()
 
 
@@ -61,11 +118,13 @@ async def test_backlog_drained_on_connect(tmp_path):
     server.close(); await server.wait_closed(); mb.close()
 
 
-async def test_no_backlog_for_wrong_project(tmp_path):
+async def test_directed_backlog_delivered_even_if_host_lacks_project(tmp_path):
+    # Host-directed messages must reach their target host on connect even
+    # when the host hasn't announced that project (delegation guarantee).
     hub, mb, server, port = await _hub(tmp_path, seed=[env("a", project="P")])
     async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
         await ws.send(json.dumps({"op": "hello", "token": "t-work", "projects": ["OTHER"]}))
         assert json.loads(await ws.recv())["op"] == "welcome"
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(ws.recv(), timeout=0.3)
+        d = json.loads(await ws.recv())
+        assert d["op"] == "deliver" and d["env"]["msg_id"] == "a"
     server.close(); await server.wait_closed(); mb.close()

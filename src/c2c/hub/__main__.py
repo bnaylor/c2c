@@ -13,6 +13,8 @@ from c2c.hub.server import Hub
 
 log = logging.getLogger("c2c.hub")
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
 
 def build_hub(db_path: str, auth_path: str) -> tuple[Hub, Mailbox]:
     mb = Mailbox(db_path)
@@ -29,6 +31,14 @@ async def _sweeper(mb: Mailbox, interval_s: int) -> None:
 
 
 async def run(host, port, db_path, auth_path, sweep_interval_s=3600, ssl_context=None):
+    if ssl_context is None and host not in _LOOPBACK_HOSTS:
+        log.warning(
+            "c2c hub is binding non-loopback host %s WITHOUT TLS: bearer "
+            "tokens and envelope contents will be sent in cleartext. Put a "
+            "TLS-terminating reverse proxy in front of this hub, or pass "
+            "--certfile/--keyfile.",
+            host,
+        )
     hub, mb = build_hub(db_path, auth_path)
     server = await hub.serve(host, port, ssl_context=ssl_context)
     sweep = asyncio.create_task(_sweeper(mb, sweep_interval_s))
