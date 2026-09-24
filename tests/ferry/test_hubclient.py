@@ -128,23 +128,12 @@ async def test_flush_is_single_flighted_no_duplicate_send(tmp_path):
     server.close(); await server.wait_closed(); mb.close()
 
 
-async def test_auth_refusal_backoff_grows_and_clears_stale_state(tmp_path, monkeypatch):
-    """Covers two related fixes:
-    - backoff must grow (1, 2, 4, 8, ...) across repeated auth-refused
-      connect attempts instead of resetting to 1.0 every time (which made a
-      bad token retry ~once/sec forever).
-    - on the non-welcome (auth-refused) path, connect_once must clear
-      self._ws/_connected rather than leaving a stale, closed ws set.
-
-    Only the `asyncio` name inside the hubclient module is swapped for a
-    thin proxy whose `.sleep()` records the delay and yields via the real
-    sleep(0); every other attribute (Lock, create_task, CancelledError, ...)
-    delegates straight through to the real asyncio module. This avoids
-    patching the process-wide asyncio.sleep, which would also intercept
-    unrelated sleeps inside the websockets library (e.g. its keepalive
-    ping) and corrupt the recorded backoff sequence.
-    """
-    mb, server, port = await _hub(tmp_path)
+async def test_auth_refusal_backoff_grows(monkeypatch):
+    """Backoff must grow 1,2,4,8 across repeated auth-refused attempts instead
+    of resetting to 1.0 each time. Driven deterministically: connect_once is
+    stubbed to report auth-refusal (False) with no network, and hubclient's
+    asyncio.sleep is replaced by a recorder that yields instantly, so the
+    recorded delays are exactly the backoff sequence with no timing races."""
     delays = []
     real_asyncio = asyncio
 
@@ -158,26 +147,36 @@ async def test_auth_refusal_backoff_grows_and_clears_stale_state(tmp_path, monke
 
     monkeypatch.setattr("c2c.ferry.hubclient.asyncio", _FakeAsyncio())
 
-    bad = HubClient(f"ws://127.0.0.1:{port}", "wrong-token",
-                    projects_provider=lambda: ["P"], on_deliver=lambda e: None)
-    task = asyncio.create_task(bad.run())
+    client = HubClient("ws://127.0.0.1:1", "tok",
+                       projects_provider=lambda: [], on_deliver=lambda e: None)
 
-    for _ in range(500):
+    async def _refuse():
+        return False  # simulate an auth-refused connect_once, no network
+
+    monkeypatch.setattr(client, "connect_once", _refuse)
+
+    task = asyncio.create_task(client.run())
+    for _ in range(1000):
         if len(delays) >= 4:
             break
-        await asyncio.sleep(0.01)
-
-    # Stale-state fix: after an auth-refused attempt, no dangling ws/connected.
-    assert bad._ws is None
-    assert bad._connected is False
-
+        await asyncio.sleep(0)
     task.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
-    server.close(); await server.wait_closed(); mb.close()
 
-    assert delays[:4] == [1.0, 2.0, 4.0, 8.0], (
-        f"expected growing backoff 1,2,4,8; got {delays[:4]!r}"
-    )
+    assert delays[:4] == [1.0, 2.0, 4.0, 8.0], f"got {delays[:4]!r}"
+
+
+async def test_auth_refusal_clears_stale_state(tmp_path):
+    """On the non-welcome (auth-refused) path, connect_once returns False and
+    leaves no dangling ws/connected state."""
+    mb, server, port = await _hub(tmp_path)
+    client = HubClient(f"ws://127.0.0.1:{port}", "wrong-token",
+                       projects_provider=lambda: ["P"], on_deliver=lambda e: None)
+    ok = await client.connect_once()
+    assert ok is False
+    assert client._ws is None
+    assert client._connected is False
+    server.close(); await server.wait_closed(); mb.close()
