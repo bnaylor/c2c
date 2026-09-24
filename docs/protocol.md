@@ -369,3 +369,21 @@ Framing, auth, reverse channel, hold-in-auto-mode, and hop-chain are all
 resolved. Remaining unknowns (hold under strict permission modes, `detail`
 gating, inbound peer-pid check) don't block a bridge targeting auto-mode
 sessions. Next artifact: bridge architecture.
+
+---
+
+## Registry identity is per-process — confirmed 2026-09-23
+
+A probe published two peer identities from ONE process: same alive pid in both
+registry entries, distinct sockets and key files, but NON-pid registry
+filenames (`c2cmid-alpha.json`, `c2cmid-beta.json`). Neither appeared in
+`ListAgents`, and the probe's sockets were never connected to (ListAgents'
+250ms probe never fired against them). **[OBS]**
+
+Conclusion: the registry reader keys on the filename `<pid>.json` — **exactly
+one peer identity per process.** To expose N named peers you need N processes.
+
+Ferry consequence: for 2 hosts, the ferry is a single process = a single peer
+representing the other host (directed == fan-out when there's only one other
+host). For 3+ hosts, a supervisor + one child process per exposed peer. v1
+targets the 2-host single-peer model.
