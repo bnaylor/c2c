@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import time
@@ -59,15 +60,41 @@ class LocalPeer:
             await self._srv.serve_forever()
 
     async def _handle(self, reader, writer) -> None:
+        limit = wire_max()
+        buf = b""
         try:
-            data = await reader.read(wire_max())
+            while True:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                if len(buf) > limit:
+                    # oversized payload: stop reading and drop the connection
+                    writer.close()
+                    return
         except OSError:
-            return
-        finally:
             writer.close()
-        for line in data.split(b"\n"):
-            if not line.strip():
-                continue
+            return
+        writer.close()
+
+        lines = [ln for ln in buf.split(b"\n") if ln.strip()]
+        if not lines:
+            return
+
+        try:
+            auth = json.loads(lines[0])
+        except ValueError:
+            return
+        token = auth.get("token") if isinstance(auth, dict) else None
+        if (
+            not isinstance(auth, dict)
+            or auth.get("type") != "auth"
+            or not isinstance(token, str)
+            or not hmac.compare_digest(token, self.peer_token)
+        ):
+            return
+
+        for line in lines[1:]:
             try:
                 obj = json.loads(line)
             except ValueError:
@@ -103,6 +130,8 @@ class LocalPeer:
         return True
 
     def cleanup(self) -> None:
+        if self._srv is not None:
+            self._srv.close()
         h = hashlib.sha256(self.sock_path.encode()).hexdigest()
         for p in (
             self.sock_path,

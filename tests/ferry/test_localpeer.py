@@ -47,10 +47,9 @@ class FakeSession:
         self.srv.close()
 
 
-async def test_inject_delivers_authed_user_frame(tmp_path):
-    sock_dir = tmp_path / "socks"; sock_dir.mkdir()
-    fs = FakeSession(tmp_path, str(sock_dir), 200, "worker", "/repo")
-    lp = LocalPeer("work", str(tmp_path), str(sock_dir), on_message=lambda f: None)
+async def test_inject_delivers_authed_user_frame(tmp_path, short_sock_dir):
+    fs = FakeSession(tmp_path, short_sock_dir, 200, "worker", "/repo")
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir, on_message=lambda f: None)
     lp.publish()
     recv = asyncio.create_task(fs.recv_one())
     ok = await lp.inject(fs.entry, "do the thing", ["aa" * 12], "mid-1")
@@ -65,20 +64,18 @@ async def test_inject_delivers_authed_user_frame(tmp_path):
     lp.cleanup(); fs.close()
 
 
-async def test_inject_refuses_on_protocol_mismatch(tmp_path):
-    sock_dir = tmp_path / "socks"; sock_dir.mkdir()
-    fs = FakeSession(tmp_path, str(sock_dir), 201, "w", "/repo", peer_protocol=2)
-    lp = LocalPeer("work", str(tmp_path), str(sock_dir), on_message=lambda f: None)
+async def test_inject_refuses_on_protocol_mismatch(tmp_path, short_sock_dir):
+    fs = FakeSession(tmp_path, short_sock_dir, 201, "w", "/repo", peer_protocol=2)
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir, on_message=lambda f: None)
     lp.publish()
     ok = await lp.inject(fs.entry, "x", None, "mid-2")
     assert ok is False
     lp.cleanup(); fs.close()
 
 
-async def test_serve_invokes_on_message(tmp_path):
-    sock_dir = tmp_path / "socks"; sock_dir.mkdir()
+async def test_serve_invokes_on_message(tmp_path, short_sock_dir):
     received = []
-    lp = LocalPeer("work", str(tmp_path), str(sock_dir),
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir,
                    on_message=lambda f: received.append(f))
     lp.publish()
     server = asyncio.create_task(lp.serve())
@@ -96,3 +93,23 @@ async def test_serve_invokes_on_message(tmp_path):
     assert received[0]["body"] == "please review"
     assert received[0]["hop_chain"] == ["bb" * 12]
     assert received[0]["raw_from"] == "uds:/tmp/cc-socks/900.sock"
+
+
+async def test_serve_rejects_bad_auth_token(tmp_path, short_sock_dir):
+    received = []
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir,
+                   on_message=lambda f: received.append(f))
+    lp.publish()
+    server = asyncio.create_task(lp.serve())
+    await asyncio.sleep(0.05)
+    # an attacker (or a stale/wrong token) connects and sends a well-formed
+    # user frame, but with the WRONG token in the auth line.
+    msg = wire.build_user_message("uds:/tmp/cc-socks/901.sock", "eve",
+                                  "do something bad", "mid-4", hop_chain=None)
+    raw = wire.encode_frames("not-the-real-token", msg)
+    reader, writer = await asyncio.open_unix_connection(lp.sock_path)
+    writer.write(raw); await writer.drain()
+    writer.close()
+    await asyncio.sleep(0.1)
+    lp.cleanup(); server.cancel()
+    assert received == []
