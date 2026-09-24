@@ -52,14 +52,21 @@ class Ferry:
             log.info("no local session for project %s; holding %s", env["project"], mid)
             return  # do NOT ack: redelivers later
         payload = env.get("payload", {})
+        # Record the reply-correlation BEFORE injecting: inject() writes to
+        # the target and can trigger a reply before it returns (the target
+        # may reply as soon as bytes hit its socket, well before inject()'s
+        # own post-write bookkeeping would run). If we recorded this after
+        # inject() returned, a fast reply could race ahead and land
+        # misclassified as a plain "note" instead of a "reply".
+        self._pending_reply[target["messagingSocketPath"]] = mid
         ok = await self._peer.inject(
             target, payload.get("body", ""), payload.get("hop_chain"),
             str(uuid.uuid4()),
         )
         if not ok:
             log.warning("inject failed for %s -> %s", mid, target.get("name"))
-            return
-        self._pending_reply[target["messagingSocketPath"]] = mid
+            self._pending_reply.pop(target["messagingSocketPath"], None)
+            return  # do NOT ack
         self._hub.ack(mid)
 
     def on_local_message(self, fields: dict) -> None:

@@ -116,13 +116,11 @@ async def test_home_to_work_and_back(tmp_path):
         assert injected["body"] == "review PR 42"
         assert injected["from"] == work_peer.sock_uri  # reply routes to work ferry
 
-        # LocalPeer.inject() writes to the bg socket, then sleeps 0.15s
-        # ("macOS buffer-flush parity") before work_ferry.on_deliver records
-        # the pending-reply correlation and acks. The bg socket already has
-        # the bytes at this point (that's how _read_injected returned), so
-        # without this pause the reply below can race ahead of that
-        # bookkeeping and land as a plain "note" instead of a "reply".
-        await asyncio.sleep(0.3)
+        # Ferry.on_deliver now records the pending-reply correlation BEFORE
+        # calling inject(), so a fast reply is correctly classified even
+        # with no pause here. This tiny sleep is just local-socket
+        # scheduling slack, not a workaround for the correlation race.
+        await asyncio.sleep(0.05)
 
         # the work bg session replies to the work ferry's peer socket
         reply = wire.build_user_message(bg_sock, "iris-bg", "done, LGTM",
