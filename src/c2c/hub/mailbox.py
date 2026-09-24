@@ -54,7 +54,28 @@ class Mailbox:
                 json.dumps(env, separators=(",", ":")),
             ),
         )
+        self._evict_over_cap(env["project"])
         self._db.commit()
+
+    def _evict_over_cap(self, project: str) -> None:
+        victims = self._db.execute(
+            "SELECT msg_id FROM messages WHERE project = ? "
+            "ORDER BY created_at DESC, msg_id DESC LIMIT -1 OFFSET ?",
+            (project, self._max),
+        ).fetchall()
+        for row in victims:
+            self._db.execute("DELETE FROM messages WHERE msg_id = ?", (row["msg_id"],))
+            self._db.execute("DELETE FROM acks WHERE msg_id = ?", (row["msg_id"],))
+
+    def sweep_expired(self, now_ms: int) -> int:
+        rows = self._db.execute(
+            "SELECT msg_id FROM messages WHERE expires_at <= ?", (now_ms,)
+        ).fetchall()
+        for row in rows:
+            self._db.execute("DELETE FROM messages WHERE msg_id = ?", (row["msg_id"],))
+            self._db.execute("DELETE FROM acks WHERE msg_id = ?", (row["msg_id"],))
+        self._db.commit()
+        return len(rows)
 
     def pending_for(self, host: str, projects: set[str], now_ms: int) -> list[dict]:
         rows = self._db.execute(
@@ -71,6 +92,8 @@ class Mailbox:
         for r in rows:
             env = json.loads(r["body"])
             if env["target"]["kind"] == "project" and env["project"] not in projects:
+                continue
+            if env["target"]["kind"] == "host" and env["target"]["project"] not in projects:
                 continue
             out.append(env)
         return out
