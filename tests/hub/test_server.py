@@ -1,0 +1,71 @@
+import json
+import asyncio
+import pytest
+import websockets
+
+from c2c.hub.server import Hub
+from c2c.hub.mailbox import Mailbox
+from c2c.hub.auth import Auth
+
+
+def env(msg_id, project="P", origin="home", created=1000):
+    return {
+        "v": 1, "msg_id": msg_id, "origin_host": origin, "project": project,
+        "target": {"kind": "host", "host": "work", "project": project},
+        "type": "note", "ttl_s": 100000, "created_at": created,
+        "orig_msg_id": None, "payload": {},
+    }
+
+
+async def _hub(tmp_path, seed=None):
+    mb = Mailbox(str(tmp_path / "m.db"))
+    if seed:
+        for e in seed:
+            mb.put(e)
+    auth = Auth({"home": "t-home", "work": "t-work"})
+    hub = Hub(mb, auth, now_ms=lambda: 5000)
+    server = await hub.serve("127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return hub, mb, server, port
+
+
+async def test_hello_bad_token_gets_error_and_close(tmp_path):
+    hub, mb, server, port = await _hub(tmp_path)
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await ws.send(json.dumps({"op": "hello", "token": "nope", "projects": []}))
+        msg = json.loads(await ws.recv())
+        assert msg["op"] == "error"
+        with pytest.raises(websockets.ConnectionClosed):
+            await ws.recv()
+    server.close(); await server.wait_closed(); mb.close()
+
+
+async def test_hello_ok_gets_welcome(tmp_path):
+    hub, mb, server, port = await _hub(tmp_path)
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await ws.send(json.dumps({"op": "hello", "token": "t-work", "projects": ["P"]}))
+        msg = json.loads(await ws.recv())
+        assert msg == {"op": "welcome", "host": "work"}
+    server.close(); await server.wait_closed(); mb.close()
+
+
+async def test_backlog_drained_on_connect(tmp_path):
+    hub, mb, server, port = await _hub(tmp_path, seed=[env("a"), env("b", created=2000)])
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await ws.send(json.dumps({"op": "hello", "token": "t-work", "projects": ["P"]}))
+        assert json.loads(await ws.recv())["op"] == "welcome"
+        d1 = json.loads(await ws.recv())
+        d2 = json.loads(await ws.recv())
+        assert d1["op"] == "deliver" and d1["env"]["msg_id"] == "a"
+        assert d2["env"]["msg_id"] == "b"
+    server.close(); await server.wait_closed(); mb.close()
+
+
+async def test_no_backlog_for_wrong_project(tmp_path):
+    hub, mb, server, port = await _hub(tmp_path, seed=[env("a", project="P")])
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await ws.send(json.dumps({"op": "hello", "token": "t-work", "projects": ["OTHER"]}))
+        assert json.loads(await ws.recv())["op"] == "welcome"
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(ws.recv(), timeout=0.3)
+    server.close(); await server.wait_closed(); mb.close()
