@@ -4,7 +4,7 @@ Claude Code already lets sessions on the *same* machine find each other and pass
 
 ## Why you'd want this
 
-Concrete version of the problem: I run Claude Code on two laptops.  One is personal, on a metered plan.  The other is a work machine wired to an effectively unlimited model budget (models on Vertex, no quota).  Plenty of projects live on both.  Today, coordinating them is manual -- I notice a PR needs review, walk over to the other laptop, paste the request in, wait, walk back.  Same for "run the integration suite on your box" and "you take this issue, I'll take that one".
+Concrete version of the problem: I run Claude Code on two laptops.  One is personal, on a metered plan.  The other is a work machine wired to  Anthropic models on Vertex.  Plenty of projects live on both.  Today, coordinating them is manual -- I notice a PR needs review, walk over to the other laptop, paste the request in, wait, walk back.  Same for "run the integration suite on your box" and "you take this issue, I'll take that one".
 
 c2c makes that automatic.  From a session on the home box you send a one-liner to the work box; a background agent over there wakes up, does the review (or runs the suite, or picks up the issue), and reports back into your session.  The expensive work happens where the budget is, and you never touched the other keyboard.
 
