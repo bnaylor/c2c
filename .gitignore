@@ -3,3 +3,9 @@ tap.log
 
 # scratch
 *.tmp
+
+# python build/test artifacts
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
