@@ -26,7 +26,7 @@ Two pieces plus your existing sessions:
 - **ferry** -- a small daemon on each host.  It publishes itself into Claude Code's local session registry, so it shows up as an ordinary peer in `ListAgents` and answers to `SendMessage` like any other session.  On the receiving side it injects incoming messages into a live local session (preferring a background one) using the same peer protocol real sessions use.
 - **hub** -- one dumb, durable relay you host somewhere both machines can reach.  It holds per-project mailboxes, authenticates each host with a token, and forwards messages.  It stores and forwards, so the far side doesn't have to be awake when you send -- the message waits until a session that can handle it shows up.
 
-Projects are keyed by git remote URL, so "the iris project" means the same thing on both hosts automatically.  You don't configure a project list; the ferry figures it out from whatever repos your sessions are sitting in.
+Projects are keyed by git remote URL, so "the kube-agents project" means the same thing on both hosts automatically.  You don't configure a project list; the ferry figures it out from whatever repos your sessions are sitting in.
 
 Messages arrive as the normal `Message from @work (ctrl+o to expand)` line you already see for same-machine peers, and the agent's response shows up in its transcript.  Nothing happens silently -- it's the exact same surface Claude Code already gives you, just sourced from another machine.
 
