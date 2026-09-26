@@ -4,6 +4,15 @@ tap.log
 # scratch
 *.tmp
 
+# local config and secrets -- NEVER commit these, the repo is public.
+# hub-auth.json holds the per-host bearer tokens; ferry configs hold one each.
+hub-auth.json
+ferry*.json
+*.pem
+
+# hub mailbox
+*.db
+
 # python build/test artifacts
 __pycache__/
 *.egg-info/
