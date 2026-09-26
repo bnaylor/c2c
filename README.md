@@ -87,6 +87,8 @@ SendMessage(to="work", message="review PR #42 and reply with findings")
 
 The ferry infers the project from your session's working directory, drops the message in the hub, and the work box's ferry delivers it into a session there.  You get the reply back in your session.  For it to land immediately the far side needs a session that's actually taking turns -- a background agent (`claude --bg "..."`) is the ideal target, since it sits alive and picks up inbound messages on its own.  If nothing's running for that project yet, the hub holds the message until something is.
 
+That paragraph hides a lot: `work` names a host rather than a session, and which project you hit depends on the directory you send from.  Worth reading [Addressing is odd](#addressing-is-odd-and-worth-understanding) before you lean on it.
+
 ## What you can send (v1)
 
 Freeform coordination: `note` and `reply`.  You write the instruction, the receiving agent reads it and acts.  "Review PR #42."  "Run the integration suite and tell me what breaks."  "I'm taking the auth refactor, leave it alone."
@@ -99,9 +101,27 @@ This is v1, and honest about it:
 
 - Built and tested for **one person, two hosts**, all sessions in auto permission mode.  That's the design center, not a limitation to apologize for.
 - The hub must sit behind TLS.  In-process rate limiting isn't there -- put it behind a proxy if it's exposed to the open internet.
-- A reply goes back to the exact session that asked, matched on `sessionId`.  If that session is gone the reply is held for redelivery (one hour, then it expires) rather than handed to a session that never asked.  That pin is in-memory, so a ferry restart between question and answer falls back to picking any session on the project.
 - The ferry's outbound queue is in-memory.  A ferry restart mid-flight recovers via hub redelivery + dedup, so you get at-least-once, not lost messages -- but not zero duplicates across a crash.
 - 3+ hosts and the typed message kinds are follow-ups.  The two-host case is a single peer per side, which keeps everything simple.
+
+### Addressing is odd, and worth understanding
+
+`SendMessage(to="work", ...)` does not name a session, or a project, or even really a machine.  It names **your local ferry**, which is wearing the far host's name.  Everything else about where the message ends up is inferred, and the inference is the part that surprises people.
+
+**One peer per remote host, and that's a hard floor.**  The ferry is one process publishing one registry entry, because the registry keys on the filename `<pid>.json` -- exactly one peer identity per process, confirmed on a live install (`docs/protocol.md`).  So `work` can never expand into a list of the far side's sessions, no matter how many are running over there.  Exposing N named peers would take N processes.
+
+**The same `to="work"` goes to different places depending on where you're sitting.**  The ferry reads the project from the *sending session's* working directory -- `git remote get-url origin`, normalized to `host/owner/repo` -- and routes on that.  From a session in `~/src/iris` the message lands on iris; from one in `~/src/pastefix` it lands on pastefix.  Nothing about the peer name changes.  This is the good kind of odd: your dozen sessions on the far box are already addressable by project, for free, as long as they're in distinct repos.
+
+**You can't choose which session on the far side, and the choice is arbitrary.**  Candidates are sessions whose cwd resolves to the same project; among those, a background agent beats an interactive one; ties break on whichever most recently updated its status.  With three background sessions on one repo, you get one of them and no say in it.  There's no way to address "the one on branch X".
+
+**Replies are the exception.**  An answer is pinned to the exact `sessionId` that asked, so a conversation stays with one session for its whole life rather than jumping to whichever background agent the heuristic prefers.  If that session is gone the reply is held for redelivery (one hour, then it expires) rather than handed to a session that never asked.  The pin is in-memory, so a ferry restart between question and answer drops back to the heuristic.
+
+**Two ways this currently misleads you**, both known gaps:
+
+- `work` shows up in *every* local session's `ListAgents`, including sessions in repos the far host has never cloned.  It looks equally addressable from all of them.  Send from one of those and the hub holds the message for up to a week while nothing tells you.
+- Send from a directory that isn't a git repo, or has no `origin`, and the message is dropped with a log line and no feedback in your session.
+
+The far side also can't see which of your sessions sent a note -- a note carries the host name, not a session identity.  It reads as "from work", never "from the iris-ac session on work".
 
 Not a hosted service, not multi-tenant, no accounts.  It's your machines talking to each other through a relay you control.
 
