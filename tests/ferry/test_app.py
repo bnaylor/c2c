@@ -2,6 +2,7 @@ import asyncio
 import json
 import hashlib
 import os
+import pathlib
 import socket
 import pytest
 from c2c.ferry.app import Ferry, NOTIFY_COOLDOWN_MS
@@ -514,4 +515,40 @@ async def test_sending_from_a_non_repo_directory_says_so(tmp_path, short_sock_di
     assert "/home/me/notes" in got["body"]
     assert "origin" in got["body"]
     assert ferry._pending_reply == {}
+    lp.cleanup(); srv.close()
+
+
+async def test_an_unreachable_winner_does_not_starve_a_live_session(
+        tmp_path, short_sock_dir):
+    # A session can be alive yet unreachable: wedged, or a pid recycled under a
+    # stale entry whose socket file still exists. Such a target has the
+    # freshest statusUpdatedAt, so it wins selection, refuses the connection,
+    # and -- because a failed inject holds without acking -- wins again on
+    # every redelivery. The message never lands despite a live session
+    # sitting right there.
+    _a, dead_sock, _ = make_session(tmp_path, short_sock_dir, 1500, "wedged",
+                                    "/repo", kind="bg", status_updated_at=999)
+    pathlib.Path(dead_sock).write_text("")  # a path, but nothing accepting
+    _b, good_sock, _ = make_session(tmp_path, short_sock_dir, 1501, "healthy",
+                                    "/repo", kind="bg", status_updated_at=1)
+    srv = listen(good_sock)
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir, on_message=lambda f: None)
+    lp.publish()
+    rec = Recorder()
+    ferry = Ferry(cfg(tmp_path, short_sock_dir), lp, rec, Dedup(600000, lambda: 0),
+                  projectfn=lambda cwd: "PROJ", now_ms=lambda: 1)
+
+    env = {"v": 1, "msg_id": "m1", "origin_host": "home", "project": "PROJ",
+           "target": {"kind": "host", "host": "work", "project": "PROJ"},
+           "type": "note", "ttl_s": 100000, "created_at": 1,
+           "orig_msg_id": None, "payload": {"body": "run tests", "hop_chain": None}}
+
+    reader = asyncio.create_task(read_injected(srv, timeout=2))
+    await ferry.on_deliver(env)
+    got = await reader
+
+    assert got["body"] == "run tests"
+    assert rec.acks == ["m1"]
+    # nothing is left pending against the target that refused us
+    assert dead_sock not in ferry._pending_reply
     lp.cleanup(); srv.close()

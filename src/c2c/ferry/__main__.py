@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import time
 
 from c2c.ferry.app import Ferry
@@ -56,8 +57,21 @@ async def run(config: FerryConfig) -> None:
     serve = asyncio.create_task(peer.serve())
     link = asyncio.create_task(hub.run())
     ann = asyncio.create_task(_announcer(ferry, hub))
+    running = asyncio.gather(serve, link, ann)
+    # Without these, a plain terminate skips the cleanup below and leaves the
+    # registry entry, key file and socket behind -- a second peer with our name
+    # that the next ferry has to compete with. SIGKILL still can't be caught,
+    # so read_sessions filters dead pids as the backstop.
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, running.cancel)
+        except (NotImplementedError, RuntimeError):
+            pass  # platform without signal handlers; cleanup is best-effort
     try:
-        await asyncio.gather(serve, link, ann)
+        await running
+    except asyncio.CancelledError:
+        log.info("ferry shutting down")
     finally:
         for t in (serve, link, ann):
             t.cancel()

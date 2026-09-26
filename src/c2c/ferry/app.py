@@ -35,6 +35,12 @@ REPLY_TTL_S = 3600
 # uncoalesced repeats would silently vanish and look broken.
 NOTIFY_COOLDOWN_MS = 60000
 
+# How many ranked candidates to try before giving up and holding. A session can
+# be alive but unreachable -- wedged, or a recycled pid under a stale entry
+# whose socket file survives -- and holding on the first refusal lets it win
+# every redelivery and starve a healthy session on the same project.
+MAX_INJECT_ATTEMPTS = 3
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -84,27 +90,30 @@ class Ferry:
             # suppress it and re-ack so the hub stops redelivering.
             self._hub.ack(mid)
             return
-        target, pin = self._select_target(env, mid)
-        if target is None:
+        candidates, pin = self._candidates(env, mid)
+        if not candidates:
             return  # do NOT record, do NOT ack: redelivers later
         payload = env.get("payload", {})
-        # Record the reply-correlation BEFORE injecting: inject() writes to
-        # the target and can trigger a reply before it returns (the target
-        # may reply as soon as bytes hit its socket, well before inject()'s
-        # own post-write bookkeeping would run). If we recorded this after
-        # inject() returned, a fast reply could race ahead and land
-        # misclassified as a plain "note" instead of a "reply".
-        sock_path = target["messagingSocketPath"]
-        self._pending_reply.setdefault(
-            sock_path, deque(maxlen=PENDING_PER_SOCKET_MAX)).append(mid)
-        ok = await self._peer.inject(
-            target, payload.get("body", ""), payload.get("hop_chain"),
-            str(uuid.uuid4()),
-        )
-        if not ok:
+        for target in candidates[:MAX_INJECT_ATTEMPTS]:
+            # Record the reply-correlation BEFORE injecting: inject() writes to
+            # the target and can trigger a reply before it returns (the target
+            # may reply as soon as bytes hit its socket, well before inject()'s
+            # own post-write bookkeeping would run). If we recorded this after
+            # inject() returned, a fast reply could race ahead and land
+            # misclassified as a plain "note" instead of a "reply".
+            sock_path = target["messagingSocketPath"]
+            self._pending_reply.setdefault(
+                sock_path, deque(maxlen=PENDING_PER_SOCKET_MAX)).append(mid)
+            ok = await self._peer.inject(
+                target, payload.get("body", ""), payload.get("hop_chain"),
+                str(uuid.uuid4()),
+            )
+            if ok:
+                break
             log.warning("inject failed for %s -> %s", mid, target.get("name"))
             self._unqueue_pending(sock_path, mid)
-            return  # do NOT record, do NOT ack
+        else:
+            return  # nobody took it: hold, do NOT record, do NOT ack
         # Only mark as delivered once inject has actually succeeded, so a
         # held or failed delivery remains eligible for a later redeliver
         # instead of being silently dropped as a "duplicate".
@@ -247,25 +256,27 @@ class Ferry:
         if not q:
             del self._pending_reply[sock_path]
 
-    def _select_target(self, env: dict, mid: str) -> tuple[dict | None, str | None]:
-        """The session to inject into, and the reply-pin to retire once that
-        inject succeeds. A None target means hold for a later redelivery."""
+    def _candidates(self, env: dict, mid: str) -> tuple[list[dict], str | None]:
+        """Sessions to try injecting into, best first, and the reply-pin to
+        retire once one of them accepts. An empty list means hold."""
         pin = self._reply_pin(env)
         if pin is not None:
-            # A reply belongs to the session that asked, so pick_target's bg
-            # preference must not get a vote here. If that session is gone we
-            # hold rather than hand the answer to a session that never asked.
+            # A reply belongs to the session that asked, so the bg preference
+            # must not get a vote here -- and there is no second choice: if
+            # that session is gone we hold rather than hand the answer to a
+            # session that never asked.
             target = registry.session_by_id(self._sessions(),
                                             self._awaiting_reply[pin])
             if target is None:
                 log.info("origin session for %s is gone; holding reply %s", pin, mid)
-            return target, pin
-        target = registry.pick_target(self._sessions(), env["project"],
-                                      self._projectfn)
-        if target is None:
+                return [], pin
+            return [target], pin
+        ranked = registry.rank_targets(self._sessions(), env["project"],
+                                       self._projectfn)
+        if not ranked:
             log.info("no local session for project %s; holding %s",
                      env["project"], mid)
-        return target, None
+        return ranked, None
 
     def _reply_pin(self, env: dict) -> str | None:
         """The orig msg_id this reply answers, if we are the host that asked."""

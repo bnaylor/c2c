@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+
+import pytest
 from c2c.ferry import registry as r
 
 
@@ -93,3 +95,22 @@ def test_peer_token_for_uses_no_realpath_hash(tmp_path):
 def test_peer_token_for_missing_key(tmp_path):
     entry = write_session(tmp_path, 100, "a", "/x", "/tmp/cc-socks/100.sock")
     assert r.peer_token_for(entry, str(tmp_path)) is None
+
+
+@pytest.mark.real_pid_liveness
+def test_pid_alive_distinguishes_a_reaped_process(tmp_path):
+    import subprocess
+    assert r.pid_alive(os.getpid()) is True
+    p = subprocess.Popen(["true"])
+    p.wait()  # reaped: the pid is valid but the process is gone
+    assert r.pid_alive(p.pid) is False
+
+
+def test_read_sessions_drops_entries_whose_process_is_gone(tmp_path):
+    # A session killed without cleanup leaves its registry entry, key file and
+    # socket behind. Treating that as a live peer is what lets a dead session
+    # win pick_target and then refuse every connection.
+    write_session(tmp_path, 100, "live", "/repo", "/tmp/cc-socks/100.sock")
+    write_session(tmp_path, 101, "ghost", "/repo", "/tmp/cc-socks/101.sock")
+    ss = r.read_sessions(str(tmp_path), is_alive=lambda pid: pid != 101)
+    assert {s["pid"] for s in ss} == {100}
