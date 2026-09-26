@@ -7,9 +7,17 @@ Single source of truth for c2c. Merges three inputs:
 - `peer-protocol-v1.md` §10 — post-extraction corrections
 
 Confidence tags: **[OBS]** confirmed against the live system here ·
-**[EXT]** from binary extraction, consistent with outside observation, not yet
-seen on the wire · **[INF]** inference, unverified · **[WIRE]** to be confirmed
-by the socket tap (`tap.py`).
+**[SRC]** read directly out of the shipped binary's bundled JS — the control
+flow itself, not a summary of it; ranks above [EXT] because nothing is
+paraphrasing, and it can settle negatives a wire tap cannot (an absent UI
+handler emits no frame to capture) · **[EXT]** from binary extraction,
+consistent with outside observation, not yet seen on the wire · **[INF]**
+inference, unverified · **[WIRE]** to be confirmed by the socket tap
+(`tap.py`).
+
+[SRC] findings cite the minified symbol names they came from. Those names are
+regenerated per build: treat them as a re-verification trail for this exact
+install, not as stable identifiers.
 
 Install observed: claude 2.1.236, macOS arm64, 2026-09-23.
 None of this is a public contract. Gate everything on the registry's
@@ -125,13 +133,21 @@ extraction. Receipts come back by connecting to it. The `content` wraps the text
 ```
 Literal `<cross-session-message` in user text is escaped `<\`.
 
-**Control frames** (each its own line, `type:"control"`):
+**Control frames** (each its own line, `type:"control"`). The frame's
+discriminator is **`action`**, not `control` — corrected from extraction,
+**[SRC]** (`O8m` dispatches on `e.action`; `KKo` builds
+`{type:"control", ...frame, msgV, msg_id}`):
 - `notify_when_idle` — subscribe; carries `from` to be called back on.
 - `peer_idle_notice` — sent back on reverse connection; `state` ∈
   `idle`|`exited`|`unavailable`, `orig_msg_id`, optional `finished_at`/`detail`.
 - `peer_message_status` — sent back; `status` ∈
   `held`|`delivered`|`denied`|`expired`, `orig_msg_id`, optional `reason`.
+  **Not user-visible, and `reason` is discarded on receipt** — see
+  "peer_message_status is invisible to the sender" below before building on it.
 - `rename` — assigns a new `name`.
+
+Any control frame carrying a `session_id` that doesn't equal the recipient's
+own is dropped before dispatch (`$8m`). **[SRC]**
 
 **Acks:** none synchronous. `write()` success + clean close = "sent". All
 feedback is a later reverse connection to the sender's `from`. **[EXT]**
@@ -370,6 +386,10 @@ resolved. Remaining unknowns (hold under strict permission modes, `detail`
 gating, inbound peer-pid check) don't block a bridge targeting auto-mode
 sessions. Next artifact: bridge architecture.
 
+Closed since, negatively: `peer_message_status` carries nothing to a human --
+see "peer_message_status is invisible to the sender" below. Sender-facing
+feedback has to be an injected `user` message.
+
 ---
 
 ## Registry identity is per-process — confirmed 2026-09-23
@@ -387,3 +407,102 @@ Ferry consequence: for 2 hosts, the ferry is a single process = a single peer
 representing the other host (directed == fan-out when there's only one other
 host). For 3+ hosts, a supervisor + one child process per exposed peer. v1
 targets the 2-host single-peer model.
+
+---
+
+## `peer_message_status` is invisible to the sender — 2026-09-25
+
+Asked because c2c wants to tell a sending session "held: nothing on the far
+host is running that project" instead of dropping it to a log line nobody
+reads. `peer_message_status` looked like the built-in answer. It is not.
+Read out of the 2.1.236 bundle; no frame was sent. **[SRC]**
+
+### The receive path ends in a no-op
+
+Dispatch for the frame (`O8m`) finishes with:
+
+```js
+else { if (e.status==="held") Ola(i); else if (e.status==="delivered" && o?.wasHeld) Dla(i);
+       qS().onPeerMessageStatus?.(e.status, i) }
+```
+
+- **`Ola`/`Dla` are the outbound rate limiter, not UI.**
+  `Ola(e){O5d(e,(t,r)=>t.credit(r))}`, `Dla` debits, both against
+  `Qh().outbound.pacer` for that target. A `held` status **credits the
+  sender's burst budget back** (the message hasn't consumed the recipient's
+  capacity yet); a `delivered` that follows a `held` debits it again.
+- **`onPeerMessageStatus` is `null` by default** (`x8m` field initializer) and
+  exactly one site in the whole bundle registers it — the headless path, which
+  writes one debug line: ``T(`[headless] cross-session hold-receipt:
+  status=${so} from=${...}`)``. No interactive/TUI registration exists, so in
+  an interactive session the optional call is a no-op.
+- **`reason` is never read by the receiver.** `Mla` returns only
+  `{destination, wasHeld}`; the call site forwards `e.status` and that
+  destination. The canned `reason` strings (`GzT`) are composed by the
+  *sender* and discarded on arrival.
+
+So a status frame cannot carry a message to a human, and a fabricated one
+silently inflates the recipient's rate-limit budget. Don't emit these to
+convey information.
+
+### Frame shape and the gates it must pass
+
+Recorded because it took real work to pin down, and the emitter is the model
+for anything c2c sends:
+
+```js
+// emitted by the hold-receipt hook when an inbound message is held
+eNr(replyTarget, {action:"peer_message_status", status, reason:GzT(status),
+                  from: ownSockUri, orig_msg_id: origin.msg_id},
+    {expectPeerPid: origin.verifiedPeerPid})
+// -> N5d(target, {type:"control", action:..., ..., msgV, msg_id})
+```
+
+Four gates, any of which discards it:
+
+1. `status` ∉ `held|denied|expired|delivered` → no branch matches, no log.
+2. `session_id` present and ≠ recipient's → dropped by `$8m`.
+3. `orig_msg_id` must match a send the **recipient** is still tracking:
+   `Mla` searches `receipts.outstandingSends`, then `awaitingTerminal` for a
+   non-`held` status. A miss logs `peer_message_status dropped: no outstanding
+   send matches orig_msg_id=…`. Sends are only tracked when `trackReceipts` is
+   on (default), via `M5d(msg_id, target)` in `CDn`.
+4. The reply address must satisfy `Eqi`: starts with `uds:` and resolves inside
+   the recipient's own socket namespace (`uZs`). The ferry's `/tmp/cc-socks`
+   default passes.
+
+Gate 3 is why a cold probe with a made-up `orig_msg_id` would have produced a
+null result indistinguishable from "nothing is listening".
+
+### Where "held" *is* visible: the receiving side
+
+The hold UI belongs to the person being messaged, driven by the
+`crossSessionInbound` setting, with real user-facing strings per cause:
+`explicit-setting`, `managed-setting` (managed policy beats a local
+`accept`), `repo-setting` (a repo may only tighten), `mode-unknown`,
+`mode-mismatch`, `no-mode-asserted`. Nothing in that surface faces the
+sender. **[SRC]**
+
+### Consequences for c2c
+
+- The only channel that reaches a sending session's transcript is a plain
+  `user` message injected into it — what the ferry already does. Any
+  "held / undeliverable" feedback has to ride that.
+- Such a self-generated note must **not** be recorded in the ferry's
+  pending-reply correlation, or the session's next message is misclassified as
+  a reply to a note the ferry invented.
+- Status notes spend the same per-target budget as real traffic
+  (`jLb().reserve(...)`, plus the ~1 msg/2 s and identical-body-within-30 s
+  limits in "Relay rules"). One note per dropped message can get itself
+  dropped — they need coalescing, not one per event.
+
+### Incidental findings
+
+- `CLAUDE_CODE_MESSAGING_TOKEN` carries the **childToken**, not the
+  `peerToken`. The bundle also logs a ready-made inject one-liner:
+  `{ echo '{"type":"auth","token":"'"$CLAUDE_CODE_MESSAGING_TOKEN"'"}';
+  echo '{"type":"user","message":{"role":"user","content":"hello"}}'; } |
+  socat - UNIX-CONNECT:$SOCKET`. **[SRC]**
+- Auth can be optional on some platforms: a failure to publish the inbox key
+  is fatal when `authRequired`, and a warning otherwise
+  ("peers will send unauthenticated"). c2c should keep asserting auth. **[SRC]**

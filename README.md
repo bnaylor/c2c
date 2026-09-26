@@ -30,7 +30,7 @@ Projects are keyed by git remote URL, so "the kube-agents project" means the sam
 
 Messages arrive as the normal `Message from @work (ctrl+o to expand)` line you already see for same-machine peers, and the agent's response shows up in its transcript.  Nothing happens silently -- it's the exact same surface Claude Code already gives you, just sourced from another machine.
 
-It rides a protocol that isn't officially documented.  We reverse-engineered it and verified every claim on the wire (see `docs/protocol.md` and `tap.py` if you're curious -- the short version is that a parked background session really will wake on an inbound message, act on it, and report back, which is the whole thing that makes this work).
+It rides a protocol that isn't officially documented.  We reverse-engineered it, confirmed the parts c2c depends on against a live install -- most of them on the wire, a few by reading the shipped bundle where a capture can't settle the question -- and tagged every claim with how it was established (see `docs/protocol.md` and `docs/tap.py` if you're curious -- the short version is that a parked background session really will wake on an inbound message, act on it, and report back, which is the whole thing that makes this work).
 
 ## Quickstart
 
@@ -109,7 +109,7 @@ Not a hosted service, not multi-tenant, no accounts.  It's your machines talking
 
 - `src/c2c/hub/` -- the relay: sqlite mailbox, token auth, websocket server
 - `src/c2c/ferry/` -- the per-host daemon: wire adapter, registry reader, hub client, orchestrator
-- `docs/protocol.md` -- the reverse-engineered peer protocol, verified on the wire
+- `docs/protocol.md` -- the reverse-engineered peer protocol, each claim tagged with how it was confirmed
 - `docs/superpowers/` -- the design spec and implementation plans
-- `tap.py` -- the probe used to capture real frames (handy for poking at the protocol yourself)
+- `docs/tap.py` -- the probe used to capture real frames (handy for poking at the protocol yourself)
 - `tests/` -- unit tests per module plus an end-to-end test that stands up a real hub, two ferries, and a fake background session and pushes a message through the whole thing
