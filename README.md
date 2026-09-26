@@ -116,10 +116,16 @@ This is v1, and honest about it:
 
 **Replies are the exception.**  An answer is pinned to the exact `sessionId` that asked, so a conversation stays with one session for its whole life rather than jumping to whichever background agent the heuristic prefers.  If that session is gone the reply is held for redelivery (one hour, then it expires) rather than handed to a session that never asked.  The pin is in-memory, so a ferry restart between question and answer drops back to the heuristic.
 
-**Two ways this currently misleads you**, both known gaps:
+**`work` still shows up in every local session's `ListAgents`**, including sessions in repos the far host has never cloned, so it looks equally addressable from all of them.  It isn't -- but you now find out instead of guessing.  The hub knows, the moment you post, whether the far host is connected and whether it has announced a session on your project, and it says so; your ferry turns that into a line in the transcript of the session that asked:
 
-- `work` shows up in *every* local session's `ListAgents`, including sessions in repos the far host has never cloned.  It looks equally addressable from all of them.  Send from one of those and the hub holds the message for up to a week while nothing tells you.
-- Send from a directory that isn't a git repo, or has no `origin`, and the message is dropped with a log line and no feedback in your session.
+```
+[c2c] Held: nothing on work is running github.com/you/iris right now.
+      Your message is queued and will be delivered once something is.
+```
+
+It promises eventual delivery rather than claiming the far side is empty, because that's the honest reading: the hub stored the message either way, and announcements lag by up to 15 seconds, so a session that just started over there may not be reflected yet.  Repeats are coalesced -- firing five messages at an offline host is one piece of news, not five.  Sending from a directory with no git `origin` likewise tells you so now, instead of dropping the message on a log line.
+
+What you still don't get is a delivery confirmation.  The protocol has a mechanism for that (`peer_message_status`) and it turns out to be invisible to the sender -- nothing in an interactive session listens for it, and the explanatory string it carries is discarded on arrival.  See `docs/protocol.md`.  Building a chatty substitute would double the traffic for every message, so silence after the queued note means it went out.
 
 The far side also can't see which of your sessions sent a note -- a note carries the host name, not a session identity.  It reads as "from work", never "from the iris-ac session on work".
 

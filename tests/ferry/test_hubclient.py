@@ -190,3 +190,21 @@ def test_outbox_is_bounded(monkeypatch):
         c.post({"msg_id": str(i)})          # disconnected -> just queues
     assert len(c._outbox) == 3               # bounded
     assert [op["env"]["msg_id"] for op in c._outbox] == ["7", "8", "9"]  # newest kept
+
+
+async def test_status_op_reaches_the_status_callback(tmp_path):
+    # The hub reports undeliverable posts on the same link; the client has to
+    # surface them rather than ignore an op it doesn't recognise.
+    mb, server, port = await _hub(tmp_path)
+    seen = []
+    home = HubClient(f"ws://127.0.0.1:{port}", "t-home",
+                     projects_provider=lambda: ["P"], on_deliver=lambda e: None,
+                     on_status=seen.append)
+    task = asyncio.create_task(home.run())
+    await asyncio.sleep(0.2)
+    home.post(env("a", {"kind": "host", "host": "work", "project": "P"}))
+    await asyncio.sleep(0.3)
+
+    assert seen == [{"op": "status", "msg_id": "a", "state": "held_no_host",
+                     "host": "work", "project": "P"}]
+    task.cancel(); server.close(); await server.wait_closed(); mb.close()

@@ -4,7 +4,7 @@ import hashlib
 import os
 import socket
 import pytest
-from c2c.ferry.app import Ferry
+from c2c.ferry.app import Ferry, NOTIFY_COOLDOWN_MS
 from c2c.ferry.config import FerryConfig
 from c2c.ferry.localpeer import LocalPeer
 from c2c.ferry.dedup import Dedup
@@ -36,6 +36,21 @@ def listen(sock):
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock); srv.listen(2); srv.setblocking(False)
     return srv
+
+
+async def read_injected(srv, timeout=1.0):
+    """Accept one connection on `srv` and return the parsed wrapper fields."""
+    loop = asyncio.get_running_loop()
+    conn, _ = await asyncio.wait_for(loop.sock_accept(srv), timeout)
+    data = b""
+    while data.count(b"\n") < 2:
+        c = await loop.sock_recv(conn, 65536)
+        if not c:
+            break
+        data += c
+    conn.close()
+    _auth, user = [json.loads(x) for x in data.decode().strip().split("\n")]
+    return wire.parse_wrapper(user["message"]["content"])
 
 
 async def whoever_connects(candidates, run, timeout=1.0):
@@ -405,3 +420,98 @@ async def test_second_turn_of_an_exchange_also_returns_to_the_asker(
                                      answer("a2", follow_up["msg_id"], "fixed")))
     assert hit == ["asker"], f"second turn went to {hit}"
     lp.cleanup(); srv_inter.close(); srv_bg.close()
+
+
+async def test_hub_status_tells_the_asking_session_its_message_is_held(
+        tmp_path, short_sock_dir):
+    # Without this the message just sits in the hub's mailbox for a week and
+    # nothing in the session that sent it ever says so.
+    _e, sock, _t = make_session(tmp_path, short_sock_dir, 1200, "iris-ac",
+                                "/repo", kind="interactive")
+    srv = listen(sock)
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir, on_message=lambda f: None)
+    lp.publish()
+    rec = Recorder()
+    ferry = Ferry(cfg(tmp_path, short_sock_dir), lp, rec, Dedup(600000, lambda: 0),
+                  projectfn=lambda cwd: "gh/x/iris", now_ms=lambda: 1)
+
+    ferry.on_local_message({"raw_from": f"uds:{sock}", "from_name": "iris-ac",
+                            "hop_chain": None, "body": "review pr 42"})
+    status = {"op": "status", "msg_id": rec.posts[0]["msg_id"],
+              "state": "held_no_host", "host": "work", "project": "gh/x/iris"}
+
+    task = asyncio.create_task(ferry.on_hub_status(status))
+    got = await read_injected(srv)
+    await task
+
+    assert "work" in got["body"]
+    assert "held" in got["body"].lower()
+    # The heads-up is the ferry talking, not a peer message awaiting an answer:
+    # recording it would make the session's next message look like a reply to
+    # a note the ferry invented.
+    assert ferry._pending_reply == {}
+    lp.cleanup(); srv.close()
+
+
+async def test_repeated_held_news_is_coalesced_then_repeats_after_cooldown(
+        tmp_path, short_sock_dir):
+    # Firing several messages at an offline host is one piece of news, not one
+    # per message. It also has to start working again later, or a session that
+    # hits this twice an hour only hears about it once.
+    _e, sock, _t = make_session(tmp_path, short_sock_dir, 1300, "iris-ac",
+                                "/repo", kind="interactive")
+    srv = listen(sock)
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir, on_message=lambda f: None)
+    lp.publish()
+    rec = Recorder()
+    clock = {"t": 1000}
+    ferry = Ferry(cfg(tmp_path, short_sock_dir), lp, rec, Dedup(600000, lambda: 0),
+                  projectfn=lambda cwd: "gh/x/iris", now_ms=lambda: clock["t"])
+
+    async def send_and_report():
+        ferry.on_local_message({"raw_from": f"uds:{sock}", "from_name": "iris-ac",
+                                "hop_chain": None, "body": "ping"})
+        await ferry.on_hub_status({"op": "status",
+                                   "msg_id": rec.posts[-1]["msg_id"],
+                                   "state": "held_no_host", "host": "work",
+                                   "project": "gh/x/iris"})
+
+    first = asyncio.create_task(read_injected(srv))
+    await send_and_report()
+    assert "work" in (await first)["body"]
+
+    # second message, same news, same minute -> silence
+    await send_and_report()
+    with pytest.raises(asyncio.TimeoutError):
+        await read_injected(srv, timeout=0.3)
+
+    # an hour later it is news again
+    clock["t"] += NOTIFY_COOLDOWN_MS + 1
+    again = asyncio.create_task(read_injected(srv))
+    await send_and_report()
+    assert "work" in (await again)["body"]
+    lp.cleanup(); srv.close()
+
+
+async def test_sending_from_a_non_repo_directory_says_so(tmp_path, short_sock_dir):
+    # Previously this was a log line and nothing else: the message vanished and
+    # the session that sent it had no way to know why.
+    _e, sock, _t = make_session(tmp_path, short_sock_dir, 1400, "scratch",
+                                "/home/me/notes", kind="interactive")
+    srv = listen(sock)
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir, on_message=lambda f: None)
+    lp.publish()
+    rec = Recorder()
+    ferry = Ferry(cfg(tmp_path, short_sock_dir), lp, rec, Dedup(600000, lambda: 0),
+                  projectfn=lambda cwd: None, now_ms=lambda: 1)
+
+    reader = asyncio.create_task(read_injected(srv))
+    ferry.on_local_message({"raw_from": f"uds:{sock}", "from_name": "scratch",
+                            "hop_chain": None, "body": "review pr 42"})
+    got = await reader
+
+    assert rec.posts == []  # still not sent -- there is nowhere to send it
+    assert "/home/me/notes" in got["body"]
+    assert "origin" in got["body"]
+    assert ferry._pending_reply == {}
+    lp.cleanup(); srv.close()

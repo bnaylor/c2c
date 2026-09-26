@@ -142,6 +142,35 @@ class Hub:
                 await rc.ws.send(json.dumps({"op": "deliver", "env": env}))
             except websockets.ConnectionClosed:
                 pass
+        await self._maybe_status(conn, env)
+
+    async def _maybe_status(self, conn: _Conn, env: dict) -> None:
+        """Tell the poster when nothing on the far side can take this yet.
+
+        The sending host can't distinguish "peer is down" from "peer is busy"
+        -- only the hub sees both the connection table and what each host
+        announced. Advisory only: the message is stored either way, and the
+        receiving ferry's own view of its sessions is authoritative (announces
+        lag by up to the announce interval, so a session that just started may
+        not be reflected here yet).
+        """
+        t = env["target"]
+        if t["kind"] != "host":
+            return  # fan-out has no single expected recipient to report on
+        peer = self._conns.get(t["host"])
+        if peer is None:
+            state = "held_no_host"
+        elif env["project"] not in peer.projects:
+            state = "held_no_project"
+        else:
+            return  # deliverable: a status per successful post is pure noise
+        try:
+            await conn.ws.send(json.dumps({
+                "op": "status", "msg_id": env["msg_id"], "state": state,
+                "host": t["host"], "project": env["project"],
+            }))
+        except websockets.ConnectionClosed:
+            pass
 
     def _recipients(self, env: dict) -> list[_Conn]:
         t = env["target"]

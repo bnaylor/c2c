@@ -251,3 +251,54 @@ async def test_reply_returns_to_the_asking_session(tmp_path):
     finally:
         shutil.rmtree(work_socks_path, ignore_errors=True)
         shutil.rmtree(home_socks_path, ignore_errors=True)
+
+
+async def test_offline_peer_is_reported_back_into_the_asking_session(tmp_path):
+    """No work ferry is connected, so the hub stores the note and says nobody
+    can take it. That report has to come back as a message in the transcript of
+    the session that sent it -- the whole point of the hub telling us."""
+    home_socks_path = tempfile.mkdtemp(prefix="c2c-", dir="/tmp")
+    try:
+        mb = Mailbox(str(tmp_path / "hub.db"))
+        hub = Hub(mb, Auth({"home": "t-home", "work": "t-work"}))
+        server = await hub.serve("127.0.0.1", 0)
+        url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        PROJECT = "github.com/sackheads/iris"
+
+        home_dir = tmp_path / "home_sessions"; home_dir.mkdir()
+        ask_srv, ask_sock = make_bg_session(home_dir, home_socks_path, 730,
+                                            "iris-ac", "/hrepo",
+                                            kind="interactive")
+        cfg = FerryConfig(host_id="home", peer_host="work", hub_url=url,
+                          token="t-home", sessions_dir=str(home_dir),
+                          sock_dir=home_socks_path)
+        home_peer = LocalPeer("work", str(home_dir), home_socks_path, on_message=None)
+        home_hub = HubClient(url, "t-home", lambda: [PROJECT], None)
+        ferry = Ferry(cfg, home_peer, home_hub, Dedup(600000, lambda: 0),
+                      projectfn=lambda cwd: PROJECT, now_ms=lambda: 10)
+        home_peer._on_message = ferry.on_local_message
+        home_hub._on_deliver = ferry.on_deliver
+        home_hub._on_status = ferry.on_hub_status
+        home_peer.publish()
+        tasks = [asyncio.create_task(t) for t in (home_peer.serve(), home_hub.run())]
+        await asyncio.sleep(0.4)
+
+        loop = asyncio.get_running_loop()
+        reader = asyncio.create_task(_read_injected(loop, ask_srv))
+        ask = wire.build_user_message(ask_sock, "iris-ac", "review PR 42", "ask-mid")
+        _r, w = await asyncio.open_unix_connection(home_peer.sock_path)
+        w.write(wire.encode_frames(home_peer.peer_token, ask))
+        await w.drain(); w.close()
+
+        got = await asyncio.wait_for(reader, timeout=3)
+        assert "work" in got["body"] and "held" in got["body"].lower()
+        # and the note itself is still in the mailbox waiting for work
+        assert [e["payload"]["body"] for e in mb.pending_for("work", {PROJECT}, 20)] \
+            == ["review PR 42"]
+
+        for t in tasks:
+            t.cancel()
+        home_peer.cleanup(); ask_srv.close()
+        server.close(); await server.wait_closed(); mb.close()
+    finally:
+        shutil.rmtree(home_socks_path, ignore_errors=True)

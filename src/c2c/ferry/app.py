@@ -1,6 +1,7 @@
 """Ferry orchestrator: glue delivery, local relay, and reply correlation."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -28,6 +29,12 @@ AWAITING_REPLY_MAX = 1000
 NOTE_TTL_S = 604800
 REPLY_TTL_S = 3600
 
+# Don't re-tell one session the same thing inside this window. Five messages
+# fired at an offline host should produce one heads-up, not five -- and the
+# receiving inbox drops an identical body re-sent within 30s anyway, so
+# uncoalesced repeats would silently vanish and look broken.
+NOTIFY_COOLDOWN_MS = 60000
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -50,6 +57,11 @@ class Ferry:
         # msg_id we posted -> sessionId of the local session that asked, so its
         # reply comes back to it instead of to whatever pick_target prefers.
         self._awaiting_reply: dict[str, str] = {}
+        # (sessionId, kind of news) -> when we last said it, for coalescing.
+        self._notified: dict[tuple[str, str], int] = {}
+        # strong refs for fire-and-forget notifies; a bare create_task can be
+        # garbage-collected mid-flight.
+        self._notify_tasks: set = set()
 
     def _sessions(self) -> list[dict]:
         return [
@@ -112,7 +124,14 @@ class Ferry:
             return
         project = self._projectfn(sender.get("cwd", ""))
         if not project:
-            log.info("sender cwd %s has no project; dropping", sender.get("cwd"))
+            cwd = sender.get("cwd", "")
+            log.info("sender cwd %s has no project; dropping", cwd)
+            sid = sender.get("sessionId")
+            if sid:
+                self._spawn_notify(sid, "no_project", (
+                    f"[c2c] Not sent: {cwd} has no git 'origin', so there is no "
+                    f"project to route to. c2c keys projects on the origin URL "
+                    f"-- send from a checkout that has one."))
             return
         sock_path = sender["messagingSocketPath"]
         orig = self._next_pending(sock_path)
@@ -127,6 +146,79 @@ class Ferry:
         if sid:
             self._pin_reply(env["msg_id"], sid)
         self._hub.post(env)
+
+    async def on_hub_status(self, msg: dict) -> None:
+        """The hub says this message can't be delivered yet. Tell whoever asked.
+
+        Advisory: the hub stores the message regardless, and the far ferry's
+        own view of its sessions is authoritative. So the wording promises
+        eventual delivery rather than claiming the far side is empty -- which
+        would be wrong whenever an announce is merely stale.
+        """
+        sid = self._awaiting_reply.get(msg.get("msg_id"))
+        if sid is None:
+            return  # not ours to report (restarted ferry, or someone else's)
+        body = self._status_body(msg)
+        if body is None:
+            return
+        await self._notify_session(sid, f"{msg.get('state')}", body)
+
+    def _spawn_notify(self, session_id: str, key: str, body: str) -> None:
+        """Schedule a notify from a sync caller (the local-message callback).
+
+        Fire-and-forget deliberately: handling an inbound peer frame should not
+        block on a courtesy note, and a failed one is logged rather than
+        retried.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop to schedule on (direct call outside the ferry)
+        task = loop.create_task(self._notify_session(session_id, key, body))
+        self._notify_tasks.add(task)
+        task.add_done_callback(self._notify_tasks.discard)
+
+    def _status_body(self, msg: dict) -> str | None:
+        host, project = msg.get("host"), msg.get("project")
+        state = msg.get("state")
+        if state == "held_no_host":
+            return (f"[c2c] Held: {host} isn't connected right now. Your "
+                    f"message is queued and will be delivered when it is.")
+        if state == "held_no_project":
+            return (f"[c2c] Held: nothing on {host} is running {project} right "
+                    f"now. Your message is queued and will be delivered once "
+                    f"something is.")
+        return None  # unknown state: say nothing rather than guess
+
+    async def _notify_session(self, session_id: str, key: str, body: str) -> None:
+        """Inject a ferry-authored note into one local session.
+
+        Goes straight to inject(), never through on_deliver(): the
+        pending-reply correlation belongs to real peer messages, and recording
+        this would make the session's next message look like a reply to a note
+        the ferry invented.
+        """
+        target = registry.session_by_id(self._sessions(), session_id)
+        if target is None:
+            return
+        if not self._notify_ok(session_id, key):
+            return
+        ok = await self._peer.inject(target, body, None, str(uuid.uuid4()))
+        if not ok:
+            log.warning("could not notify %s: %s", target.get("name"), body)
+
+    def _notify_ok(self, session_id: str, key: str) -> bool:
+        now = self._now()
+        k = (session_id, key)
+        last = self._notified.get(k)
+        if last is not None and now - last < NOTIFY_COOLDOWN_MS:
+            return False
+        self._notified = {
+            kk: t for kk, t in self._notified.items()
+            if now - t < NOTIFY_COOLDOWN_MS
+        }
+        self._notified[k] = now
+        return True
 
     def _pin_reply(self, msg_id: str, session_id: str) -> None:
         self._awaiting_reply[msg_id] = session_id
