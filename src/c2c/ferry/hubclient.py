@@ -21,11 +21,13 @@ OUTBOX_MAX = 10000
 class HubClient:
     def __init__(self, url: str, token: str,
                  projects_provider: Callable[[], list[str]],
-                 on_deliver: Callable[[dict], object]) -> None:
+                 on_deliver: Callable[[dict], object],
+                 on_status: Callable[[dict], object] | None = None) -> None:
         self._url = url
         self._token = token
         self._projects = projects_provider
         self._on_deliver = on_deliver
+        self._on_status = on_status
         self._outbox: deque[dict] = deque(maxlen=OUTBOX_MAX)  # queued ops
         self._ws = None
         self._connected = False
@@ -77,8 +79,13 @@ class HubClient:
             try:
                 async for raw in ws:
                     msg = json.loads(raw)
-                    if msg.get("op") == "deliver":
+                    op = msg.get("op")
+                    if op == "deliver":
                         res = self._on_deliver(msg["env"])
+                        if inspect.isawaitable(res):
+                            await res
+                    elif op == "status" and self._on_status is not None:
+                        res = self._on_status(msg)
                         if inspect.isawaitable(res):
                             await res
             finally:

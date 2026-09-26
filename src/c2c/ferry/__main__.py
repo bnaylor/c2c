@@ -32,6 +32,7 @@ def build_ferry(config: FerryConfig):
 
     # Wire the actual callbacks after ferry is created
     hub._on_deliver = ferry.on_deliver
+    hub._on_status = ferry.on_hub_status
     hub._projects = ferry.live_projects
     peer._on_message = ferry.on_local_message
 

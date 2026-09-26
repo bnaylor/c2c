@@ -109,3 +109,44 @@ async def test_bad_post_errors_but_keeps_connection(tmp_path):
     await asyncio.sleep(0.1)
     await home.close()
     server.close(); await server.wait_closed(); mb.close()
+
+
+async def test_status_when_target_host_is_offline(tmp_path):
+    # The sender cannot tell "work is down" from "work is busy". The hub can,
+    # at post time, and saying so is the only way the asking session ever
+    # learns its message is sitting in the mailbox.
+    hub, mb, server, port = await _hub(tmp_path)
+    home = await _connect(port, "t-home", ["P"])
+    await home.send(json.dumps({"op": "post", "env": env("a", host_t("work"))}))
+    s = json.loads(await asyncio.wait_for(home.recv(), timeout=2))
+    assert s == {"op": "status", "msg_id": "a", "state": "held_no_host",
+                 "host": "work", "project": "P"}
+    assert [e["msg_id"] for e in mb.pending_for("work", {"P"}, 5000)] == ["a"]
+    await home.close(); server.close(); await server.wait_closed(); mb.close()
+
+
+async def test_status_when_target_host_has_no_session_for_the_project(tmp_path):
+    # work is connected but announced no session on P, so its ferry will hold
+    # the message rather than deliver it.
+    hub, mb, server, port = await _hub(tmp_path)
+    work = await _connect(port, "t-work", ["OTHER"])
+    home = await _connect(port, "t-home", ["P"])
+    await home.send(json.dumps({"op": "post", "env": env("a", host_t("work"))}))
+    s = json.loads(await asyncio.wait_for(home.recv(), timeout=2))
+    assert s == {"op": "status", "msg_id": "a", "state": "held_no_project",
+                 "host": "work", "project": "P"}
+    await work.close(); await home.close()
+    server.close(); await server.wait_closed(); mb.close()
+
+
+async def test_no_status_when_the_message_can_be_delivered(tmp_path):
+    # A status per successful post would double the chatter for no gain.
+    hub, mb, server, port = await _hub(tmp_path)
+    work = await _connect(port, "t-work", ["P"])
+    home = await _connect(port, "t-home", ["P"])
+    await home.send(json.dumps({"op": "post", "env": env("a", host_t("work"))}))
+    assert json.loads(await asyncio.wait_for(work.recv(), timeout=2))["op"] == "deliver"
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(home.recv(), timeout=0.3)
+    await work.close(); await home.close()
+    server.close(); await server.wait_closed(); mb.close()
