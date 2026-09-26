@@ -99,6 +99,7 @@ This is v1, and honest about it:
 
 - Built and tested for **one person, two hosts**, all sessions in auto permission mode.  That's the design center, not a limitation to apologize for.
 - The hub must sit behind TLS.  In-process rate limiting isn't there -- put it behind a proxy if it's exposed to the open internet.
+- A reply goes back to the exact session that asked, matched on `sessionId`.  If that session is gone the reply is held for redelivery (one hour, then it expires) rather than handed to a session that never asked.  That pin is in-memory, so a ferry restart between question and answer falls back to picking any session on the project.
 - The ferry's outbound queue is in-memory.  A ferry restart mid-flight recovers via hub redelivery + dedup, so you get at-least-once, not lost messages -- but not zero duplicates across a crash.
 - 3+ hosts and the typed message kinds are follow-ups.  The two-host case is a single peer per side, which keeps everything simple.
 

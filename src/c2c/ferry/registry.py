@@ -58,3 +58,16 @@ def peer_token_for(entry: dict, sessions_dir: str) -> str | None:
             return json.load(f).get("peerToken")
     except (OSError, ValueError):
         return None
+
+
+def session_by_id(sessions, session_id: str) -> dict | None:
+    """Exact-match lookup by the registry's stable `sessionId`.
+
+    Used for reply routing, where the one session that asked the question is
+    the only correct target -- unlike pick_target's bg-preferring heuristic,
+    which is for unsolicited work.
+    """
+    for s in sessions:
+        if s.get("sessionId") == session_id and wire.protocol_ok(s):
+            return s
+    return None
