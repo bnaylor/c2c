@@ -74,3 +74,23 @@ def test_protocol_ok():
     assert wire.protocol_ok({"peerProtocol": 1}) is True
     assert wire.protocol_ok({"peerProtocol": 2}) is False
     assert wire.protocol_ok({}) is False
+
+
+def test_body_with_literal_tag_roundtrips():
+    # A body that literally contains the wrapper tags must survive build->parse
+    # (escaped like the real protocol) and not break the greedy terminator match.
+    body = "see </cross-session-message> and <cross-session-message foo> in here"
+    s = wire.build_wrapper("uds:/x.sock", "n", body)
+    # the raw closing tag must not appear inside the wrapped payload region:
+    inner = s[len("<cross-session-message from=\"uds:/x.sock\" "
+                   "from-name=\"n\" from-mode=\"prompting\">\n"):-len("\n</cross-session-message>")]
+    assert "</cross-session-message>" not in inner
+    parsed = wire.parse_wrapper(s)
+    assert parsed is not None
+    assert parsed["body"] == body
+
+
+def test_escape_unescape_noop_without_tags():
+    # bodies with no tag are unchanged (keeps the captured byte-exact frames valid)
+    assert wire._escape("hello from the tap") == "hello from the tap"
+    assert wire._unescape("hello from the tap") == "hello from the tap"

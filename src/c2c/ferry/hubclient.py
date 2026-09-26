@@ -5,11 +5,17 @@ import asyncio
 import inspect
 import json
 import logging
+from collections import deque
 from typing import Callable
 
 import websockets
 
 log = logging.getLogger("c2c.ferry.hubclient")
+
+# Cap on queued-but-unsent ops. Bounds memory during a long hub outage; the
+# oldest op is dropped when full (at-least-once + hub redelivery cover posts,
+# and stale acks/announces are harmless to lose).
+OUTBOX_MAX = 10000
 
 
 class HubClient:
@@ -20,7 +26,7 @@ class HubClient:
         self._token = token
         self._projects = projects_provider
         self._on_deliver = on_deliver
-        self._outbox: list[dict] = []      # queued ops (post/ack/announce)
+        self._outbox: deque[dict] = deque(maxlen=OUTBOX_MAX)  # queued ops
         self._ws = None
         self._connected = False
         self._flush_lock = asyncio.Lock()
@@ -35,7 +41,10 @@ class HubClient:
         self._enqueue({"op": "announce", "projects": projects})
 
     def _enqueue(self, op: dict) -> None:
-        self._outbox.append(op)
+        if len(self._outbox) == self._outbox.maxlen:
+            log.warning("hubclient outbox full (%d); dropping oldest op",
+                        self._outbox.maxlen)
+        self._outbox.append(op)  # deque(maxlen=…) drops the oldest when full
         if self._connected and self._ws is not None:
             asyncio.create_task(self._flush())
 
@@ -47,7 +56,7 @@ class HubClient:
                     await self._ws.send(json.dumps(op))
                 except websockets.ConnectionClosed:
                     return
-                self._outbox.pop(0)
+                self._outbox.popleft()
 
     async def connect_once(self) -> bool:
         """One connection attempt. Returns True if it got `welcome` and ran

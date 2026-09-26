@@ -11,6 +11,12 @@ from typing import Callable
 
 from c2c.ferry import registry, wire
 
+# Max time to wait on a single read from a connected peer. A legitimate sender
+# writes its auth+user lines and half-closes within milliseconds; a client that
+# connects and then stalls (or never half-closes) is dropped rather than pinning
+# a handler indefinitely.
+READ_TIMEOUT_S = 10.0
+
 
 class LocalPeer:
     def __init__(self, name: str, sessions_dir: str, sock_dir: str,
@@ -64,7 +70,12 @@ class LocalPeer:
         buf = b""
         try:
             while True:
-                chunk = await reader.read(65536)
+                try:
+                    chunk = await asyncio.wait_for(reader.read(65536), READ_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    # sender stalled / never half-closed: drop it
+                    writer.close()
+                    return
                 if not chunk:
                     break
                 buf += chunk

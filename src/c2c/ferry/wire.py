@@ -22,6 +22,20 @@ _RE = re.compile(
     r'([\s\S]*)\n</' + _TAG + r'>$'
 )
 
+_OPEN = f"<{_TAG}"          # <cross-session-message
+_CLOSE = f"</{_TAG}>"       # </cross-session-message>
+
+
+def _escape(body: str) -> str:
+    """Escape a literal wrapper tag inside a body by inserting a backslash
+    after the leading '<' (matching Claude Code's own convention), so the body
+    can't be mistaken for a wrapper boundary on parse."""
+    return body.replace(_CLOSE, "<\\" + _CLOSE[1:]).replace(_OPEN, "<\\" + _OPEN[1:])
+
+
+def _unescape(body: str) -> str:
+    return body.replace("<\\" + _CLOSE[1:], _CLOSE).replace("<\\" + _OPEN[1:], _OPEN)
+
 
 def build_wrapper(from_uri: str, from_name: str, body: str,
                   hop_chain: list[str] | None = None,
@@ -31,7 +45,7 @@ def build_wrapper(from_uri: str, from_name: str, body: str,
         attrs.append(f'hop-chain="{",".join(hop_chain)}"')
     attrs.append(f'from-name="{from_name}"')
     attrs.append(f'from-mode="{from_mode}"')
-    return f"<{_TAG} {' '.join(attrs)}>\n{body}\n</{_TAG}>"
+    return f"<{_TAG} {' '.join(attrs)}>\n{_escape(body)}\n</{_TAG}>"
 
 
 def parse_wrapper(content: str) -> dict | None:
@@ -44,7 +58,7 @@ def parse_wrapper(content: str) -> dict | None:
         "from_name": name,
         "from_mode": mode,
         "hop_chain": hop.split(",") if hop else None,
-        "body": body,
+        "body": _unescape(body),
     }
 
 

@@ -37,7 +37,7 @@ def test_project_for_cwd_caches_per_cwd(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "remote", "add", "origin",
                     "git@github.com:sackheads/iris.git"], cwd=tmp_path, check=True)
-    p.project_for_cwd.cache_clear()
+    p._cache.clear()
     real_run = subprocess.run
     calls = []
 
@@ -52,4 +52,33 @@ def test_project_for_cwd_caches_per_cwd(tmp_path, monkeypatch):
         assert first == second == "github.com/sackheads/iris"
         assert len(calls) == 1
     finally:
-        p.project_for_cwd.cache_clear()
+        p._cache.clear()
+
+
+def test_project_for_cwd_does_not_cache_none(tmp_path, monkeypatch):
+    # A directory that isn't a repo yet must NOT be cached, so a repo cloned
+    # there after the ferry started gets picked up without a restart.
+    p._cache.clear()
+    calls = []
+    real_run = subprocess.run
+
+    def counting_run(*args, **kwargs):
+        calls.append(args)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(p.subprocess, "run", counting_run)
+    try:
+        assert p.project_for_cwd(str(tmp_path)) is None   # not a repo -> git ran
+        # now it becomes a repo:
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "remote", "add", "origin",
+                        "git@github.com:sackheads/iris.git"], cwd=tmp_path, check=True)
+        # ...and the next call picks it up (None was never cached):
+        assert p.project_for_cwd(str(tmp_path)) == "github.com/sackheads/iris"
+        # project_for_cwd ran git on BOTH calls (None wasn't cached). Filter to
+        # its `remote get-url` invocation so the test's own `git remote add`
+        # (also routed through the patched subprocess.run) isn't miscounted.
+        geturl_calls = [c for c in calls if "get-url" in c[0]]
+        assert len(geturl_calls) == 2
+    finally:
+        p._cache.clear()

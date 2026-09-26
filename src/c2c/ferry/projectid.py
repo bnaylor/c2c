@@ -1,11 +1,17 @@
 """Map a working directory to a stable project id via its git origin URL."""
 from __future__ import annotations
 
-import functools
 import re
 import subprocess
 
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+# cwd -> project id. Only successful resolutions are cached: a directory that
+# isn't (yet) a repo is re-checked on the next call, so a repo cloned/inited
+# after the ferry started gets picked up without a restart. A resolved id is
+# stable for the life of the process (a project's origin doesn't change under
+# it), so caching it avoids re-running git on every delivery/announce.
+_cache: dict[str, str] = {}
 
 
 def normalize_remote(url: str) -> str:
@@ -28,8 +34,10 @@ def normalize_remote(url: str) -> str:
     return f"{host.lower()}/{path.strip('/')}"
 
 
-@functools.lru_cache(maxsize=None)
 def project_for_cwd(cwd: str) -> str | None:
+    cached = _cache.get(cwd)
+    if cached is not None:
+        return cached
     try:
         out = subprocess.run(
             ["git", "-C", cwd, "remote", "get-url", "origin"],
@@ -38,5 +46,7 @@ def project_for_cwd(cwd: str) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0 or not out.stdout.strip():
-        return None
-    return normalize_remote(out.stdout.strip())
+        return None  # not a repo (yet) -> don't cache; re-check next time
+    pid = normalize_remote(out.stdout.strip())
+    _cache[cwd] = pid
+    return pid

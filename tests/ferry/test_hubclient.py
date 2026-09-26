@@ -180,3 +180,13 @@ async def test_auth_refusal_clears_stale_state(tmp_path):
     assert client._ws is None
     assert client._connected is False
     server.close(); await server.wait_closed(); mb.close()
+
+
+def test_outbox_is_bounded(monkeypatch):
+    from c2c.ferry import hubclient as hc
+    monkeypatch.setattr(hc, "OUTBOX_MAX", 3)
+    c = hc.HubClient("ws://x", "t", lambda: [], lambda e: None)
+    for i in range(10):
+        c.post({"msg_id": str(i)})          # disconnected -> just queues
+    assert len(c._outbox) == 3               # bounded
+    assert [op["env"]["msg_id"] for op in c._outbox] == ["7", "8", "9"]  # newest kept

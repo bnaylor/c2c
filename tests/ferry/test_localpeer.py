@@ -113,3 +113,23 @@ async def test_serve_rejects_bad_auth_token(tmp_path, short_sock_dir):
     await asyncio.sleep(0.1)
     lp.cleanup(); server.cancel()
     assert received == []
+
+
+async def test_serve_read_timeout_drops_silent_client(tmp_path, short_sock_dir, monkeypatch):
+    import c2c.ferry.localpeer as lpmod
+    monkeypatch.setattr(lpmod, "READ_TIMEOUT_S", 0.2)
+    received = []
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir,
+                   on_message=lambda f: received.append(f))
+    lp.publish()
+    server = asyncio.create_task(lp.serve())
+    await asyncio.sleep(0.05)
+    # connect but send nothing and never half-close
+    reader, writer = await asyncio.open_unix_connection(lp.sock_path)
+    await asyncio.sleep(0.4)  # past the read timeout
+    # server should have timed out and closed us -> EOF, and dispatched nothing
+    data = await asyncio.wait_for(reader.read(100), 1.0)
+    assert data == b""
+    assert received == []
+    writer.close()
+    lp.cleanup(); server.cancel()
