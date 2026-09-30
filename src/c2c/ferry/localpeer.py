@@ -44,12 +44,16 @@ class LocalPeer:
             json.dump({"peerToken": self.peer_token, "procStart": ps}, f)
         os.umask(um)
         now = int(time.time() * 1000)
+        # No "notify_idle" in peerFeatures: an idle subscription can't cross
+        # the ferry, and advertising it leaves the subscriber waiting 12 h for
+        # a notice that never comes. Without it Claude Code refuses the
+        # subscribe up front and tells the session to wait for a reply.
         entry = {
             "pid": self.pid,
             "sessionId": f"00000000-0000-4000-8000-{self.pid:012d}",
             "cwd": os.getcwd(), "startedAt": now, "procStart": ps,
             "version": "2.1.236", "peerProtocol": 1,
-            "peerFeatures": ["notify_idle"], "kind": "interactive",
+            "peerFeatures": [], "kind": "interactive",
             "entrypoint": "cli", "messagingSocketPath": self.sock_path,
             "name": self.name, "nameSource": "derived", "nameSince": now,
             "status": "idle", "updatedAt": now, "statusUpdatedAt": now,

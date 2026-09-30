@@ -64,6 +64,17 @@ async def test_inject_delivers_authed_user_frame(tmp_path, short_sock_dir):
     lp.cleanup(); fs.close()
 
 
+def test_publish_does_not_advertise_idle_notices(tmp_path, short_sock_dir):
+    # Idle notices can't cross the ferry. Advertising notify_idle makes a
+    # local session subscribe and then wait 12 h for a notice that never
+    # comes; without it, the subscribe fails on the spot as unsupported.
+    lp = LocalPeer("work", str(tmp_path), short_sock_dir, on_message=lambda f: None)
+    lp.publish()
+    entry = json.loads((tmp_path / f"{lp.pid}.json").read_text())
+    assert "notify_idle" not in entry["peerFeatures"]
+    lp.cleanup()
+
+
 async def test_inject_refuses_on_protocol_mismatch(tmp_path, short_sock_dir):
     fs = FakeSession(tmp_path, short_sock_dir, 201, "w", "/repo", peer_protocol=2)
     lp = LocalPeer("work", str(tmp_path), short_sock_dir, on_message=lambda f: None)
